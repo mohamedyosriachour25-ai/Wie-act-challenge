@@ -1,0 +1,189 @@
+"""Study pipeline: who handles which step (this table is the documented orchestration choice).
+
+  route       compact   classification: subject and level (runs in parallel with `illustrate`)
+  illustrate  mid       reasoning: which figure explains the topic, and its parameters (plan once)
+  explain     compact   writes the explanation around the finished figure (execute with the small model)
+  repair      compact   fixes malformed JSON (only when needed)
+  hint        compact   short targeted text
+  filter      compact   keeps the few passages that help a question about the course material
+  answer      compact   short cited answer written from those passages
+  quiz        mid       synthesis of a question set, generated once per topic and shared by everyone
+
+Pattern: plan-once / execute-compact. The expensive model decides what to draw; the cheap model writes
+the words. Efficiency rules: one mid call per topic and language (cached, shared by every user and every
+room member), and the figure falls back to a deterministic concept map instead of a second model call.
+"""
+from __future__ import annotations
+
+import asyncio
+import re
+
+from . import prompts
+from .gateway import AIError, Gateway
+from .visuals import concept_map_from_steps, describe_figure, sanitize_visual
+
+LEVELS = ("beginner", "intermediate", "advanced")
+
+
+def clean_topic(topic: str) -> str:
+    topic = re.sub(r"\s+", " ", topic or "").strip()
+    if len(topic) < 2:
+        raise ValueError("Type a topic of at least two characters.")
+    return topic[:160]
+
+
+def _validate_route(obj: dict) -> dict:
+    level = obj.get("level") if obj.get("level") in LEVELS else "beginner"
+    return {"subject_area": str(obj.get("subject_area", "other"))[:20], "level": level}
+
+
+def _validate_figure(obj: dict) -> dict:
+    if not isinstance(obj, dict):
+        raise ValueError("bad figure")
+    # An unusable spec is not an error here: the caller falls back to a concept map built from the text.
+    return {"visual": sanitize_visual({"template": obj.get("template"), "params": obj.get("params")}), "rationale": str(obj.get("rationale", "")).strip()[:200]}
+
+
+def _validate_explanation(obj: dict) -> dict:
+    title = str(obj["title"]).strip()[:120]
+    raw_steps = obj["steps"]
+    if not title or not isinstance(raw_steps, list):
+        raise ValueError("bad explanation")
+    steps = []
+    for item in raw_steps[:6]:
+        if isinstance(item, str):
+            item = {"text": item}
+        text = str(item.get("text", "")).strip()[:240]
+        if text:
+            steps.append({"text": text, "focus": str(item.get("focus", ""))[:30]})
+    if len(steps) < 2:
+        raise ValueError("too few steps")
+    return {
+        "title": title,
+        "summary": str(obj.get("summary", "")).strip()[:300],
+        "steps": steps,
+        "everyday_example": str(obj.get("everyday_example", "")).strip()[:300],
+        "common_mistake": str(obj.get("common_mistake", "")).strip()[:300],
+    }
+
+
+def _validate_quiz(obj: dict) -> list[dict]:
+    questions = []
+    for q in obj["questions"][:5]:
+        options = [str(o).strip()[:140] for o in q["options"]]
+        answer = int(q["answer"])
+        if len(options) != 4 or not 0 <= answer <= 3 or not str(q["q"]).strip():
+            continue
+        questions.append({"q": str(q["q"]).strip()[:240], "options": options, "answer": answer, "why": str(q.get("why", "")).strip()[:240]})
+    if len(questions) < 3:
+        raise ValueError("too few questions")
+    return questions
+
+
+def _summarise(metas) -> dict:
+    return {
+        "calls": [m.to_dict() for m in metas],
+        "cached": all(m.cached for m in metas),
+        "degraded": any(m.degraded for m in metas),
+    }
+
+
+async def _together(first, second):
+    """Run two model calls at once; if one fails, cancel the other and raise."""
+    t1, t2 = asyncio.ensure_future(first), asyncio.ensure_future(second)
+    try:
+        return await t1, await t2
+    except BaseException:
+        t1.cancel()
+        t2.cancel()
+        raise
+
+
+async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str | None = None, context: list[dict] | None = None, lang: str = "en") -> dict:
+    topic, lang = clean_topic(topic), prompts.norm_lang(lang)
+    (route, m_route), (figure, m_fig) = await _together(
+        gw.chat_json("route", "compact", prompts.route_messages(topic), _validate_route, max_tokens=100),
+        gw.chat_json("illustrate", "mid", prompts.illustrate_messages(topic, lang, context), _validate_figure, max_tokens=600),
+    )
+    route = route or {"subject_area": "other", "level": "beginner"}
+    level = level if level in LEVELS else route["level"]
+    visual = (figure or {}).get("visual")
+    figure_text, focus_keys = describe_figure(visual)
+
+    exp, m_exp = await gw.chat_json(
+        "explain", "compact", prompts.explain_messages(topic, style, level, figure_text, lang, context), _validate_explanation, max_tokens=800
+    )
+    if exp is None:
+        raise AIError("format", "The model's answer could not be read. Rephrase the topic and try again.")
+
+    fallback = visual is None
+    if fallback:
+        visual = concept_map_from_steps(exp["title"], exp["steps"])
+        for i, step in enumerate(exp["steps"][:7]):
+            step["focus"] = f"s{i}"           # each step lights up its own node in the fallback map
+    else:
+        for step in exp["steps"]:
+            step["focus"] = step["focus"] if step["focus"] in focus_keys else ""
+    grounded_in = sorted({c["title"] for c in context}) if context else []
+    return {
+        "topic": topic, "level": level, "style": style, **exp, "visual": visual, "visual_fallback": fallback,
+        "figure_note": (figure or {}).get("rationale", ""), "grounded_in": grounded_in, "meta": _summarise([m_route, m_fig, m_exp]),
+    }
+
+
+async def hint(gw: Gateway, topic: str, question: str, level: int, lang: str = "en") -> dict:
+    level = max(1, min(3, level))
+    text, meta = await gw.chat("hint", "compact", prompts.hint_messages(clean_topic(topic), question[:300], level, prompts.norm_lang(lang)), max_tokens=120)
+    return {"level": level, "hint": text.strip(), "meta": _summarise([meta])}
+
+
+async def get_quiz(gw: Gateway, topic: str, level: str = "beginner", lang: str = "en") -> tuple[list[dict], dict]:
+    topic = clean_topic(topic)
+    level = level if level in LEVELS else "beginner"
+    questions, meta = await gw.chat_json("quiz", "mid", prompts.quiz_messages(topic, level, prompts.norm_lang(lang)), _validate_quiz, max_tokens=800)
+    if questions is None:
+        raise AIError("format", "The quiz could not be generated. Try again.")
+    return questions, _summarise([meta])
+
+
+def public_quiz(questions: list[dict]) -> list[dict]:
+    return [{"q": q["q"], "options": q["options"]} for q in questions]
+
+
+def _keep_validator(n: int):
+    def validate(obj: dict) -> list[int]:
+        keep = [int(k) for k in obj["keep"]]
+        keep = [k for k in dict.fromkeys(keep) if 1 <= k <= n][:3]
+        if not keep:
+            raise ValueError("empty selection")
+        return keep
+
+    return validate
+
+
+NOT_FOUND = "I could not find this in the material. Try different words, or add the page that covers it."
+
+
+async def ask_material(gw: Gateway, question: str, candidates: list[dict], min_sim: float, lang: str = "en") -> dict:
+    """Narrow before generating: similarity search (done by the caller) -> compact filter -> one mid-size answer.
+
+    Cost rules: no relevant passage means no model call at all; three or fewer relevant passages skip the
+    compact filter; the compact model only ever sees the few passages that survived.
+    """
+    question = clean_topic(question)
+    relevant = [c for c in candidates if c["score"] >= min_sim]
+    empty_meta = {"calls": [], "cached": False, "degraded": False}
+    if not relevant:
+        return {"question": question, "answer": NOT_FOUND, "sources": [], "used": [], "grounded": False, "meta": empty_meta}
+
+    metas = []
+    if len(relevant) > 3:
+        keep, m_filter = await gw.chat_json("filter", "compact", prompts.filter_messages(question, relevant), _keep_validator(len(relevant)), max_tokens=60)
+        metas.append(m_filter)
+        relevant = [relevant[i - 1] for i in (keep or [1, 2, 3])]
+
+    answer, m_answer = await gw.chat("answer", "compact", prompts.answer_messages(question, relevant, prompts.norm_lang(lang)), max_tokens=400)
+    metas.append(m_answer)
+    used = sorted({int(n) for n in re.findall(r"\[(\d+)\]", answer) if 1 <= int(n) <= len(relevant)})
+    sources = [{"n": i, "title": c["title"], "snippet": c["text"][:320], "score": round(c["score"], 2)} for i, c in enumerate(relevant, 1)]
+    return {"question": question, "answer": answer.strip(), "sources": sources, "used": used, "grounded": True, "meta": _summarise(metas)}

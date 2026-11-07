@@ -1,0 +1,10 @@
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+frontend/dist
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env
+.git
+*.zip
