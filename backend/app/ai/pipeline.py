@@ -7,7 +7,7 @@
   hint        compact   short targeted text
   filter      compact   keeps the few passages that help a question about the course material
   answer      compact   short cited answer written from those passages
-  quiz        mid       synthesis of a question set, generated once per topic and shared by everyone
+  quiz        compact   drafts a question set (reviewed by a second compact pass); the mid model is reserved for figures
 
 Pattern: plan-once / execute-compact. The expensive model decides what to draw; the cheap model writes
 the words. Efficiency rules: one mid call per topic and language (cached, shared by every user and every
@@ -101,9 +101,16 @@ async def _together(first, second):
 
 async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str | None = None, context: list[dict] | None = None, lang: str = "en") -> dict:
     topic, lang = clean_topic(topic), prompts.norm_lang(lang)
+    # Reuse a near-identical explanation, but only when it is not grounded in specific course passages.
+    sem = getattr(gw, "semcache", None)
+    store = None
+    if sem is not None and not context:
+        hit, store = await sem.fetch(f"explain:{lang}:{style}", topic)
+        if hit is not None:
+            return {**hit, "meta": {"calls": [], "cached": True, "degraded": False, "semantic": True}}
     (route, m_route), (figure, m_fig) = await _together(
-        gw.chat_json("route", "compact", prompts.route_messages(topic), _validate_route, max_tokens=100),
-        gw.chat_json("illustrate", "mid", prompts.illustrate_messages(topic, lang, context), _validate_figure, max_tokens=600),
+        gw.chat_json("route", "compact", prompts.route_messages(topic), _validate_route, max_tokens=100, schema=prompts.ROUTE_SCHEMA),
+        gw.chat_json("illustrate", "mid", prompts.illustrate_messages(topic, lang, context), _validate_figure, max_tokens=600, schema=prompts.FIGURE_SCHEMA),
     )
     route = route or {"subject_area": "other", "level": "beginner"}
     level = level if level in LEVELS else route["level"]
@@ -111,7 +118,7 @@ async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str |
     figure_text, focus_keys = describe_figure(visual)
 
     exp, m_exp = await gw.chat_json(
-        "explain", "compact", prompts.explain_messages(topic, style, level, figure_text, lang, context), _validate_explanation, max_tokens=800
+        "explain", "compact", prompts.explain_messages(topic, style, level, figure_text, lang, context), _validate_explanation, max_tokens=800, schema=prompts.EXPLAIN_SCHEMA
     )
     if exp is None:
         raise AIError("format", "The model's answer could not be read. Rephrase the topic and try again.")
@@ -125,10 +132,13 @@ async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str |
         for step in exp["steps"]:
             step["focus"] = step["focus"] if step["focus"] in focus_keys else ""
     grounded_in = sorted({c["title"] for c in context}) if context else []
-    return {
+    result = {
         "topic": topic, "level": level, "style": style, **exp, "visual": visual, "visual_fallback": fallback,
         "figure_note": (figure or {}).get("rationale", ""), "grounded_in": grounded_in, "meta": _summarise([m_route, m_fig, m_exp]),
     }
+    if store is not None:
+        store(result)
+    return result
 
 
 async def hint(gw: Gateway, topic: str, question: str, level: int, lang: str = "en") -> dict:
@@ -140,10 +150,35 @@ async def hint(gw: Gateway, topic: str, question: str, level: int, lang: str = "
 async def get_quiz(gw: Gateway, topic: str, level: str = "beginner", lang: str = "en") -> tuple[list[dict], dict]:
     topic = clean_topic(topic)
     level = level if level in LEVELS else "beginner"
-    questions, meta = await gw.chat_json("quiz", "mid", prompts.quiz_messages(topic, level, prompts.norm_lang(lang)), _validate_quiz, max_tokens=800)
-    if questions is None:
+    lang = prompts.norm_lang(lang)
+    # Draft with the mid-size model (synthesis), then revise with the compact model (checking): the
+    # reviewer fixes wrong answer keys and weak distractors. It can only keep or improve the quiz.
+    draft, m_draft = await gw.chat_json("quiz", "compact", prompts.quiz_messages(topic, level, lang), _validate_quiz, max_tokens=800, schema=prompts.QUIZ_SCHEMA)
+    if draft is None:
         raise AIError("format", "The quiz could not be generated. Try again.")
-    return questions, _summarise([meta])
+    metas = [m_draft]
+    questions = draft
+    if getattr(gw, "s", None) is not None and gw.s.quiz_verify:
+        revised, m_review = await gw.chat_json("quiz_check", "compact", prompts.quiz_review_messages(topic, draft, lang), _validate_quiz, max_tokens=800, schema=prompts.QUIZ_SCHEMA)
+        metas.append(m_review)
+        if revised is not None and len(revised) >= 3:
+            questions = revised
+    return questions, _summarise(metas)
+
+
+async def summarise_session(gw: Gateway, topic: str, transcript: str, lang: str = "en") -> dict:
+    """Compact recap of a study-room conversation (saved with the room)."""
+    text, meta = await gw.chat("summary", "compact", prompts.summary_messages(topic or "this session", transcript, prompts.norm_lang(lang)), max_tokens=350)
+    return {"summary": text.strip(), "meta": _summarise([meta])}
+
+
+async def revision_sheet(gw: Gateway, topics: list[str], lang: str = "en") -> dict:
+    """Compact revision sheet across the topics a learner has studied (student-triggered)."""
+    topics = [t for t in topics if t][:12]
+    if not topics:
+        raise ValueError("Study a few topics first, then generate a revision sheet.")
+    text, meta = await gw.chat("resume", "compact", prompts.resume_messages(topics, prompts.norm_lang(lang)), max_tokens=700)
+    return {"sheet": text.strip(), "topics": topics, "meta": _summarise([meta])}
 
 
 def public_quiz(questions: list[dict]) -> list[dict]:
@@ -164,13 +199,19 @@ def _keep_validator(n: int):
 NOT_FOUND = "I could not find this in the material. Try different words, or add the page that covers it."
 
 
-async def ask_material(gw: Gateway, question: str, candidates: list[dict], min_sim: float, lang: str = "en") -> dict:
+async def ask_material(gw: Gateway, question: str, candidates: list[dict], min_sim: float, lang: str = "en", cache_key: str | None = None) -> dict:
     """Narrow before generating: similarity search (done by the caller) -> compact filter -> one mid-size answer.
 
     Cost rules: no relevant passage means no model call at all; three or fewer relevant passages skip the
     compact filter; the compact model only ever sees the few passages that survived.
     """
     question = clean_topic(question)
+    sem = getattr(gw, "semcache", None)
+    store = None
+    if sem is not None and cache_key:  # cache_key carries the collection and a version, so new material invalidates reuse
+        hit, store = await sem.fetch(f"ask:{lang}:{cache_key}", question)
+        if hit is not None:
+            return {**hit, "meta": {"calls": [], "cached": True, "degraded": False, "semantic": True}}
     relevant = [c for c in candidates if c["score"] >= min_sim]
     empty_meta = {"calls": [], "cached": False, "degraded": False}
     if not relevant:
@@ -186,4 +227,7 @@ async def ask_material(gw: Gateway, question: str, candidates: list[dict], min_s
     metas.append(m_answer)
     used = sorted({int(n) for n in re.findall(r"\[(\d+)\]", answer) if 1 <= int(n) <= len(relevant)})
     sources = [{"n": i, "title": c["title"], "snippet": c["text"][:320], "score": round(c["score"], 2)} for i, c in enumerate(relevant, 1)]
-    return {"question": question, "answer": answer.strip(), "sources": sources, "used": used, "grounded": True, "meta": _summarise(metas)}
+    result = {"question": question, "answer": answer.strip(), "sources": sources, "used": used, "grounded": True, "meta": _summarise(metas)}
+    if store is not None:
+        store(result)
+    return result

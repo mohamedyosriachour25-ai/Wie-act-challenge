@@ -38,6 +38,7 @@ MAX_CHUNKS_COLLECTION = 600
 CHUNK_CHARS = 800
 MIN_TEXT_CHARS = 80
 MAX_IMAGES = 12
+FILE_MIME = {"pdf": "application/pdf", "txt": "text/plain", "text": "text/plain", "csv": "text/csv", "md": "text/markdown", "markdown": "text/markdown"}
 IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
 # Magic numbers, so a mislabelled or disguised file is rejected before it is stored or served.
 IMAGE_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"), (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
@@ -218,6 +219,9 @@ async def retrieve(app, collection: str, query: str, k: int = 6) -> list[dict]:
 def _doc_out(d: dict) -> dict:
     out = {k: d[k] for k in ("id", "title", "status", "chunks_total", "chunks_done", "message", "created_at")}
     out["kind"] = d["kind"] if "kind" in d.keys() else "text"
+    mime = d["file_mime"] if "file_mime" in d.keys() else None
+    out["has_file"] = bool(mime)   # an original PDF/file is kept and can be opened via /{id}/raw
+    out["mime"] = mime
     return out
 
 
@@ -225,7 +229,10 @@ def _doc_out(d: dict) -> dict:
 def list_documents(request: Request, scope: str = "me"):
     user = current_user(request)
     col = resolve_collection(request, user, scope)
-    docs = request.app.state.db.all("SELECT * FROM docs WHERE collection=? ORDER BY created_at DESC", (col,))
+    docs = request.app.state.db.all(
+        "SELECT d.*, b.mime AS file_mime FROM docs d LEFT JOIN blobs b ON b.doc_id=d.id WHERE d.collection=? ORDER BY d.created_at DESC",
+        (col,),
+    )
     return {"documents": [_doc_out(d) for d in docs]}
 
 
@@ -257,7 +264,7 @@ async def upload(request: Request, scope: str = "me", title: str = ""):
         )
         db.execute("INSERT INTO blobs (doc_id, mime, data) VALUES (?, ?, ?)", (cur.lastrowid, mime, data))
         await notify_room(request.app, col)
-        return _doc_out(db.one("SELECT * FROM docs WHERE id=?", (cur.lastrowid,)))
+        return _doc_out(db.one("SELECT d.*, b.mime AS file_mime FROM docs d LEFT JOIN blobs b ON b.doc_id=d.id WHERE d.id=?", (cur.lastrowid,)))
 
     try:
         text = extract_text(filename, data)
@@ -286,9 +293,12 @@ async def upload(request: Request, scope: str = "me", title: str = ""):
     )
     doc_id = cur.lastrowid
     db.executemany("INSERT INTO chunks (doc_id, idx, text) VALUES (?, ?, ?)", [(doc_id, i, c) for i, c in enumerate(chunks)])
+    mime = FILE_MIME.get(ext)
+    if mime:  # keep the uploaded file itself, not only its extracted text, so it can be reopened
+        db.execute("INSERT INTO blobs (doc_id, mime, data) VALUES (?, ?, ?)", (doc_id, mime, data))
     asyncio.create_task(index_document(request.app, doc_id))
     await notify_room(request.app, col)
-    return _doc_out(db.one("SELECT * FROM docs WHERE id=?", (doc_id,)))
+    return _doc_out(db.one("SELECT d.*, b.mime AS file_mime FROM docs d LEFT JOIN blobs b ON b.doc_id=d.id WHERE d.id=?", (doc_id,)))
 
 
 @router.delete("/{doc_id}")
@@ -316,7 +326,12 @@ def raw(doc_id: int, request: Request, scope: str = "me", token: str = ""):
     row = request.app.state.db.one("SELECT b.mime, b.data FROM blobs b JOIN docs d ON d.id=b.doc_id WHERE b.doc_id=? AND d.collection=?", (doc_id, col))
     if not row:
         raise HTTPException(404, tr(lang_of(request), "That document does not exist."))
-    return Response(content=row["data"], media_type=row["mime"], headers={"Cache-Control": "private, max-age=3600"})
+    title = request.app.state.db.one("SELECT title FROM docs WHERE id=?", (doc_id,))["title"]
+    safe = "".join(c for c in title if c.isalnum() or c in " ._-")[:80].strip() or "document"
+    return Response(content=row["data"], media_type=row["mime"], headers={
+        "Cache-Control": "private, max-age=3600",
+        "Content-Disposition": f'inline; filename="{safe}"',
+    })
 
 
 class AskBody(BaseModel):
@@ -333,7 +348,9 @@ async def ask(body: AskBody, request: Request):
         raise HTTPException(400, tr(lang_of(request), "Add a document and wait until it is ready, then ask your question."))
     try:
         cands = await retrieve(request.app, col, body.question)
-        return await pipeline.ask_material(request.app.state.gateway, body.question, cands, request.app.state.settings.min_similarity, lang_of(request))
+        ver = request.app.state.db.one("SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM docs WHERE collection=? AND status='ready'", (col,))
+        cache_key = f"{col}#{ver['n']}.{ver['m']}"
+        return await pipeline.ask_material(request.app.state.gateway, body.question, cands, request.app.state.settings.min_similarity, lang_of(request), cache_key=cache_key)
     except ValueError as exc:
         raise HTTPException(400, tr(lang_of(request), str(exc)))
     except AIError as exc:

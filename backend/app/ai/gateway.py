@@ -60,6 +60,7 @@ class Metrics:
         self.tokens_in = {"compact": 0, "mid": 0}
         self.tokens_out = {"compact": 0, "mid": 0}
         self.cache_hits = 0
+        self.semantic_hits = 0    # near-duplicate requests served from the semantic cache (no generation call)
         self.coalesced = 0
         self.repeated_identical = 0   # identical request that still reached the service
         self.quota_refusals = 0
@@ -80,6 +81,7 @@ class Metrics:
             "tokens_in": dict(self.tokens_in),
             "tokens_out": dict(self.tokens_out),
             "cache_hits": self.cache_hits,
+            "semantic_hits": self.semantic_hits,
             "coalesced": self.coalesced,
             "repeated_identical": self.repeated_identical,
             "quota_refusals": self.quota_refusals,
@@ -158,6 +160,9 @@ class Gateway:
         }
 
     def reset_runtime(self) -> None:
+        sc = getattr(self, "semcache", None)
+        if sc is not None:
+            sc.clear()
         self.cache.clear()
         self.seen.clear()
         self.cooldown_until = 0.0
@@ -349,23 +354,31 @@ class Gateway:
                 except ValueError:
                     pass
 
-    async def chat_json(self, task: str, cls: str, messages: list[dict], validate, max_tokens: int = 500, **kw):
-        """Ask for JSON, validate it, repair once with the compact class, else return None."""
+    async def chat_json(self, task: str, cls: str, messages: list[dict], validate, max_tokens: int = 500, schema: str = "", **kw):
+        """Ask for JSON, validate it, and if that fails, repair once with the compact class.
+
+        The repair is schema-aware: telling the small model the exact shape it must produce fixes far more
+        answers than a generic 'fix this JSON', which keeps malformed-output failures and fallbacks down."""
         text, meta = await self.chat(task, cls, messages, max_tokens, **kw)
-        for candidate in (text, None):
-            if candidate is None:
-                self.metrics.repairs += 1
-                repair = [
-                    {"role": "system", "content": "TASK: repair\nFix this JSON so it is valid and complete. Reply with JSON only."},
-                    {"role": "user", "content": text[:2500]},
-                ]
-                candidate, _ = await self.chat("repair", "compact", repair, max_tokens=min(max_tokens, 700))
-            obj = extract_json(candidate)
-            if obj is not None:
-                try:
-                    return validate(obj), meta
-                except (ValueError, KeyError, TypeError):
-                    pass
+        obj = extract_json(text)
+        if obj is not None:
+            try:
+                return validate(obj), meta
+            except (ValueError, KeyError, TypeError):
+                pass
+        self.metrics.repairs += 1
+        shape = f" It must match this exact shape, with no extra keys and no prose: {schema}" if schema else ""
+        repair = [
+            {"role": "system", "content": "TASK: repair\nReturn only valid JSON." + shape},
+            {"role": "user", "content": text[:2500]},
+        ]
+        fixed, _ = await self.chat("repair", "compact", repair, max_tokens=min(max_tokens, 700))
+        obj = extract_json(fixed)
+        if obj is not None:
+            try:
+                return validate(obj), meta
+            except (ValueError, KeyError, TypeError):
+                pass
         return None, meta
 
     async def embed(self, texts: list[str], batch: int = 32) -> list[list[float]]:

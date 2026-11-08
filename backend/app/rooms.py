@@ -3,7 +3,9 @@
 Both use one WebSocket per person. They differ in what they allow:
   group  chat (with an anonymous option), shared topic, ONE shared explanation, shared quiz, shared
          timer, participation tracking with private nudges. Capacity 2..10.
-  live   no chat: presence, a focus signal, reactions, and a timer that follows a fixed schedule.
+  live   presence, a focus signal, reactions, chat, camera wall, break games and a timer on a fixed schedule.
+         A live room can also be viewed as a "study forest": every member who joins the forest grows a tree
+         while their device reports "focused" during the focus phase; stepping away too long wilts it.
 
 Privacy: a person's "focused" state is a boolean computed on their own device. Camera sharing in Live
 rooms is peer to peer (WebRTC): the video never passes through the server, which only relays the small
@@ -29,6 +31,22 @@ from .i18n import lang_of, norm, tr
 router = APIRouter(tags=["rooms"])
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 REACTIONS = ("👏", "🔥", "💡", "☕")
+GAME_SLOT_S = 25          # seconds per trivia question (matches the client's break trivia slot)
+TURN_S = 30               # seconds each player gets in a turn-based game
+PREROLL_S = 4             # a short "get ready, next up" before the first turn
+GROUP_GAMES = ("trivia_race", "mime", "pictionary")   # games a player can choose for the break
+TURN_GAMES = ("mime", "pictionary")                    # server-driven, one performer at a time
+GUESS_GAMES = ("mime", "pictionary")                   # the performer's client judges chat guesses
+CLOCK_GAMES = ("trivia_race",)                          # client derives the schedule from the shared clock; server scores
+TREE_GRACE_S = 30         # time a tree survives with its owner away per focus session (short rooms: a quarter of the focus time)
+TREE_MIN_S = 120          # a tree is only planted if at least this much focus time is left (short rooms: half the focus time)
+TREE_MIN_GROWN_S = 20     # a tree that wilts before it grew this long (short rooms: 5% of the focus time) is dropped, not counted:
+                          # someone just looking at the page must not leave a wilted tree behind
+TREE_TICK_S = 4           # while someone is in a forest, trees are advanced and broadcast this often
+TREE_FULL_S = 180         # focused seconds for a tree to look full-grown; it is still only PLANTED at the end of the
+#                           focus phase, so a long phase means "grow it in a few minutes, then keep it alive".
+FOREST_LOG = 200          # planted/wilted trees remembered per room (in memory, like all Live state)
+PROMPT_COUNT = {"mime": 8, "pictionary": 8}            # the client holds the localized prompt text; the server sends an index
 
 
 @dataclass
@@ -45,6 +63,19 @@ class Member:
     last_reaction: float = 0.0
     lang: str = "en"
     in_video: bool = False  # has the camera turned on in a Live room (mesh WebRTC)
+    forest: bool = False    # has opened the study-forest view of this Live room
+
+
+@dataclass
+class Tree:
+    """One member's tree for one focus phase. Growth is counted from the focus boolean the member's own device reports."""
+    pseudo: str
+    cycle: int
+    t0: float                # seconds into the focus phase when it was planted
+    last: float              # epoch time up to which growth has been counted
+    grown: float = 0.0       # seconds focused
+    away: float = 0.0        # seconds not focused (or disconnected)
+    state: str = "growing"   # growing | grown | wilted
 
 
 class Room:
@@ -68,7 +99,75 @@ class Room:
         self.results: dict | None = None
         self.busy: str | None = None
         self.qa_log: list[dict] = []   # shared answers from the room's material
+        self.events: dict[int, dict] = {}        # live group games, keyed by pomodoro cycle index
+        self.game_tasks: dict[str, asyncio.Task] = {}  # one turn-game driver per chosen game in the current break
+        self.summary = row["summary"] if "summary" in row.keys() else ""
+        self.summary_at = row["summary_at"] if "summary_at" in row.keys() else 0.0
         self._presence_task: asyncio.Task | None = None
+        self.trees: dict[int, Tree] = {}         # study forest: one tree per member for the current/last focus phase
+        self.forest: list[dict] = []             # trees that finished (planted or wilted), newest last
+        self._tree_events: list[dict] = []       # finished trees not yet announced to the room
+        self._forest_task: asyncio.Task | None = None
+
+    # ------------------------------------------------------------ study forest
+    def tree_rules(self) -> tuple[float, float]:
+        """(grace, min_avail) in seconds, scaled down for very short focus phases such as the demo room."""
+        focus_s = self.timer["focus_s"]
+        return min(TREE_GRACE_S, focus_s * 0.25), min(TREE_MIN_S, focus_s * 0.5)
+
+    def update_trees(self, now: float) -> None:
+        """Advance every tree to `now`, finish the ones that wilted or reached the end of the focus phase,
+        and plant a tree for each forest member who is focused during a focus phase. Idempotent."""
+        if self.kind != "live" or not self.timer:
+            return
+        t = self.timer
+        total = t["focus_s"] + t["break_s"]
+        cyc = live_cycle(self, now)
+        grace, min_s = self.tree_rules()
+        for uid, tree in list(self.trees.items()):
+            if tree.state == "growing":
+                end = t["started_at"] + tree.cycle * total + t["focus_s"]
+                upto = min(now, end)
+                if upto > tree.last:
+                    m = self.members.get(uid)
+                    if m is not None and m.focused is True:
+                        tree.grown += upto - tree.last
+                    else:
+                        tree.away += upto - tree.last  # not focused, or the tab/connection is gone
+                    tree.last = upto
+                if tree.away > grace:
+                    if tree.grown < min(TREE_MIN_GROWN_S, t["focus_s"] * 0.05):
+                        del self.trees[uid]  # barely started: forget it quietly
+                        continue
+                    self._finish_tree(tree, "wilted", now)
+                elif now >= end:
+                    self._finish_tree(tree, "grown", now)
+            elif cyc and tree.cycle < cyc["cycles"] - 2:
+                del self.trees[uid]  # long finished: it already lives on in the forest log
+        if cyc and cyc["phase"] == "focus" and t["focus_s"] - cyc["into"] >= min_s:
+            for m in self.members.values():
+                cur = self.trees.get(m.user_id)
+                if m.forest and m.focused is True and (cur is None or cur.cycle != cyc["cycles"]):
+                    self.trees[m.user_id] = Tree(m.pseudo, cyc["cycles"], cyc["into"], now)
+
+    def _finish_tree(self, tree: Tree, state: str, now: float) -> None:
+        tree.state = state
+        entry = {"pseudo": tree.pseudo, "cycle": tree.cycle, "state": state, "at": now}
+        self.forest.append(entry)
+        del self.forest[:-FOREST_LOG]
+        self._tree_events.append(entry)
+
+    def tree_view(self, uid: int, cyc: dict | None) -> dict | None:
+        tree = self.trees.get(uid)
+        if tree is None or cyc is None or tree.cycle != cyc["cycles"]:
+            return None  # a tree belongs to its own focus phase and the break that follows it
+        avail = max(1.0, min(self.timer["focus_s"] - tree.t0, TREE_FULL_S))  # full-grown after TREE_FULL_S of focus
+        p = 1.0 if tree.state == "grown" else min(1.0, tree.grown / avail)
+        return {"state": tree.state, "p": round(p, 3), "avail": round(avail)}
+
+    def pop_tree_events(self) -> list[dict]:
+        events, self._tree_events = self._tree_events, []
+        return events
 
     # ------------------------------------------------------------ outputs
     def info(self) -> dict:
@@ -77,12 +176,23 @@ class Room:
     def presence(self) -> dict:
         members = list(self.members.values())
         if self.kind == "live":
+            now = time.time()
+            self.update_trees(now)
+            cyc = live_cycle(self, now)
             tracked = [m for m in members if m.focused is not None]
+            rows = []
+            for m in members[:40]:
+                row = {"pseudo": m.pseudo, "focused": m.focused}
+                view = self.tree_view(m.user_id, cyc)
+                if view:
+                    row["tree"] = view
+                rows.append(row)
             return {
                 "online": len(members),
                 "tracking": len(tracked),
                 "focused": sum(1 for m in tracked if m.focused),
-                "members": [{"pseudo": m.pseudo, "focused": m.focused} for m in members[:40]],
+                "members": rows,
+                "at": now,
             }
         return {
             "online": len(members),
@@ -131,6 +241,30 @@ class Hub:
         return len(room.members) if room else 0
 
 
+def log_message(app, code: str, kind: str, author: str, text: str) -> None:
+    """Persist one line of a study room's conversation, so the room is saved and can be summarised."""
+    text = (text or "").strip()[:1000]
+    if not text:
+        return
+    app.state.db.execute(
+        "INSERT INTO room_messages (code, kind, author, text, created_at) VALUES (?, ?, ?, ?, ?)",
+        (code, kind, author or "", text, time.time()),
+    )
+
+
+def load_history(db, code: str, limit: int = 80) -> list[dict]:
+    rows = db.all("SELECT id, kind, author, text, created_at FROM room_messages WHERE code=? ORDER BY id DESC LIMIT ?", (code, limit))
+    return [{"id": r["id"], "kind": r["kind"], "author": r["author"], "text": r["text"], "ts": r["created_at"]} for r in reversed(rows)]
+
+
+def transcript_text(db, code: str, limit: int = 200) -> str:
+    lines = []
+    for m in load_history(db, code, limit):
+        who = m["author"] or {"explanation": "AI explanation", "answer": "AI answer", "topic": "Topic"}.get(m["kind"], "System")
+        lines.append(f"{who}: {m['text']}")
+    return "\n".join(lines)
+
+
 async def send(member: Member, payload: dict) -> None:
     try:
         await member.ws.send_json(payload)
@@ -163,8 +297,30 @@ def schedule_presence(room: Room, delay: float = 1.5) -> None:
     async def later() -> None:
         await asyncio.sleep(delay)
         await broadcast(room, {"type": "presence", "presence": room.presence()})
+        await announce_trees(room)
 
     room._presence_task = asyncio.create_task(later())
+
+
+async def announce_trees(room: Room) -> None:
+    for entry in room.pop_tree_events():
+        await broadcast(room, {"type": "tree", "entry": entry})
+
+
+def ensure_forest_task(room: Room) -> None:
+    """While anyone is in the forest view, advance and broadcast the trees every few seconds. Stops when the last one leaves."""
+    if room._forest_task and not room._forest_task.done():
+        return
+
+    async def loop() -> None:
+        while any(m.forest for m in list(room.members.values())):
+            await asyncio.sleep(TREE_TICK_S)
+            room.update_trees(time.time())
+            if room._tree_events or any(t.state == "growing" for t in room.trees.values()):
+                await broadcast(room, {"type": "presence", "presence": room.presence()})
+                await announce_trees(room)
+
+    room._forest_task = asyncio.create_task(loop())
 
 
 # ----------------------------------------------------------------------- REST
@@ -220,6 +376,23 @@ def get_room(code: str, request: Request):
     return _row_out(request, row)
 
 
+@router.get("/api/rooms/{code}/conversation")
+def room_conversation(code: str, request: Request):
+    """The saved conversation of a study room, plus its latest summary. Any signed-in user with the code can read it."""
+    current_user(request)
+    code = code.upper()
+    row = request.app.state.db.one("SELECT kind, topic, summary, summary_at FROM rooms WHERE code=?", (code,))
+    if not row:
+        raise HTTPException(404, tr(lang_of(request), "No room has that code."))
+    if row["kind"] == "live":
+        raise HTTPException(400, tr(lang_of(request), "Live focus rooms are not saved as conversations."))
+    return {
+        "code": code, "topic": row["topic"],
+        "history": load_history(request.app.state.db, code, limit=500),
+        "summary": {"text": row["summary"], "at": row["summary_at"]},
+    }
+
+
 # ------------------------------------------------------------------ WebSocket
 @router.websocket("/ws/rooms/{code}")
 async def room_socket(ws: WebSocket, code: str, token: str = ""):
@@ -254,7 +427,26 @@ async def room_socket(ws: WebSocket, code: str, token: str = ""):
     if previous is not None:
         member.msgs, member.anon_msgs, member.joined_at = previous.msgs, previous.anon_msgs, previous.joined_at
     room.members[user["id"]] = member
-    await send(member, room.snapshot(member))
+    snap = room.snapshot(member)
+    if room.kind != "live":  # study rooms are saved as a conversation
+        snap["history"] = load_history(app.state.db, room.code)
+        snap["summary"] = {"text": room.summary, "at": room.summary_at}
+    else:  # public rooms host opt-in group games on the break
+        s = app.state.settings
+        snap["event"] = {
+            "games": list(GROUP_GAMES),   # each player picks their own; same-game players play together
+            "lead_s": max(20, min(s.event_lead_s, room.timer["focus_s"] - 20)),
+            "slot_s": GAME_SLOT_S,
+            "min_players": s.event_min_players,
+        }
+        snap["forest"] = room.forest[-60:]   # trees already planted or wilted in this room
+        cyc = live_cycle(room, time.time())
+        if cyc is not None:  # if games for this cycle already have players, send how many picked each
+            ev = room.events.get(cyc["cycles"])
+            if ev:
+                snap["event"]["cycle"] = cyc["cycles"]
+                snap["event"]["counts"] = _counts(ev)
+    await send(member, snap)
     schedule_presence(room, 0.2)
 
     try:
@@ -270,12 +462,268 @@ async def room_socket(ws: WebSocket, code: str, token: str = ""):
     finally:
         if room.members.get(user["id"]) is member:
             await _rtc_drop(room, member)
+            room.update_trees(time.time())  # growth up to the moment they left; away time counts from here
             del room.members[user["id"]]
+            if not room.members:
+                for tsk in room.game_tasks.values():
+                    if not tsk.done():
+                        tsk.cancel()
+            if room._forest_task and not any(m.forest for m in room.members.values()):
+                room._forest_task.cancel()
             schedule_presence(room, 0.2)
 
 
 def video_members(room: Room) -> list[Member]:
     return [m for m in room.members.values() if m.in_video]
+
+
+def live_cycle(room: Room, now: float) -> dict | None:
+    """Current phase of a live room's fixed, epoch-aligned schedule (mirrors the client's useCycle)."""
+    t = room.timer
+    if not t:
+        return None
+    total = t["focus_s"] + t["break_s"]
+    into_total = (now - t["started_at"]) % total
+    in_focus = into_total < t["focus_s"]
+    return {"phase": "focus" if in_focus else "break", "cycles": int((now - t["started_at"]) // total),
+            "into": into_total if in_focus else into_total - t["focus_s"]}
+
+
+def _leaderboard(ev: dict) -> list[dict]:
+    rows = sorted(ev["scores"].values(), key=lambda r: (-r["score"], r["pseudo"].lower()))
+    return [{"pseudo": r["pseudo"], "score": r["score"], "correct": r["correct"]} for r in rows]
+
+
+def _prune_events(room: Room, keep_from: int) -> None:
+    for c in [c for c in room.events if c < keep_from - 1]:
+        room.events.pop(c, None)
+
+
+def _counts(ev: dict) -> dict:
+    """How many players have chosen each game this break (shown to everyone during the invite)."""
+    return {g: len(sv["optins"]) for g, sv in ev["games"].items() if sv["optins"]}
+
+
+def _subev(ev: dict, game: str) -> dict:
+    """The per-game sub-event (its own players, scores and turn state)."""
+    return ev["games"].setdefault(game, {"game": game, "optins": {}, "scores": {}, "started": False})
+
+
+async def broadcast_game(room: Room, sv: dict, payload: dict) -> None:
+    """Send only to the players who chose this game, so parallel games don't see each other's messages."""
+    for uid in list(sv["optins"].keys()):
+        m = room.members.get(uid)
+        if m is not None:
+            await send(m, payload)
+
+
+def _active_turn_subev(room: Room, uid: int) -> dict | None:
+    """Find the turn-game (mime / pictionary) this member is currently performing in, if any."""
+    for ev in room.events.values():
+        for g in TURN_GAMES:
+            sv = ev["games"].get(g)
+            if sv and sv.get("started") and sv.get("current") == uid:
+                return sv
+    return None
+
+
+async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -> None:
+    """Group games in a public room. Each player picks their own game during focus; on the break every game that
+    has players runs in parallel — same-game players play together. Clock games (trivia) are scored from the shared
+    clock; turn games (mime, pictionary) are driven by a short server task, one performer at a time."""
+    now = time.time()
+    cyc = live_cycle(room, now)
+    if cyc is None:
+        return
+    try:
+        cycle = int(data.get("cycle"))
+    except (TypeError, ValueError):
+        return
+    if cycle < cyc["cycles"] - 1 or cycle > cyc["cycles"] + 1:  # only the current or an adjacent cycle
+        return
+
+    if kind == "event_optin":
+        game = data.get("game")
+        game = game if game in GROUP_GAMES else "trivia_race"
+        ev = room.events.setdefault(cycle, {"games": {}})
+        for g, other in ev["games"].items():      # a player belongs to exactly one game: drop any earlier pick
+            if g != game:
+                other["optins"].pop(member.user_id, None)
+                other["scores"].pop(member.user_id, None)
+        sv = _subev(ev, game)
+        sv["optins"][member.user_id] = member.pseudo
+        sv["scores"].setdefault(member.user_id, {"pseudo": member.pseudo, "score": 0, "correct": 0})
+        _prune_events(room, cyc["cycles"])
+        await broadcast(room, {"type": "event_participants", "cycle": cycle, "game": game,
+                               "counts": _counts(ev),
+                               "participants": sorted(sv["optins"].values(), key=str.lower)})
+
+    elif kind == "event_optout":      # the player would rather just rest: drop them from every game this break
+        ev = room.events.get(cycle)
+        if ev:
+            for sv in ev["games"].values():
+                sv["optins"].pop(member.user_id, None)
+                sv["scores"].pop(member.user_id, None)
+            await broadcast(room, {"type": "event_participants", "cycle": cycle, "game": None,
+                                   "counts": _counts(ev), "participants": []})
+
+    elif kind == "event_start":       # a client reports the break has begun; start each chosen turn game once
+        ev = room.events.get(cycle)
+        if not ev or cyc["phase"] != "break":
+            return
+        for game in TURN_GAMES:
+            sv = ev["games"].get(game)
+            if sv and sv["optins"] and not sv["started"]:
+                sv["started"] = True
+                old = room.game_tasks.get(game)
+                if old and not old.done():
+                    old.cancel()
+                room.game_tasks[game] = asyncio.create_task(run_turn_game(app, room, cycle, game, sv))
+
+    elif kind == "game_result":       # clock-driven games (trivia race)
+        ev = room.events.get(cycle)
+        game = data.get("game") if data.get("game") in CLOCK_GAMES else "trivia_race"
+        sv = ev["games"].get(game) if ev else None
+        if not sv or member.user_id not in sv["optins"]:
+            return
+        rnd = data.get("round")
+        correct = bool(data.get("correct"))
+        try:
+            ms = max(0.0, float(data.get("ms", GAME_SLOT_S * 1000)))
+        except (TypeError, ValueError):
+            ms = GAME_SLOT_S * 1000
+        rec = sv["scores"].setdefault(member.user_id, {"pseudo": member.pseudo, "score": 0, "correct": 0})
+        seen = rec.setdefault("_rounds", set())
+        if not isinstance(rnd, int) or rnd in seen:  # one answer per round
+            return
+        seen.add(rnd)
+        if correct:
+            bonus = round(50 * max(0.0, 1 - ms / (GAME_SLOT_S * 1000)))
+            rec["score"] += 100 + bonus
+            rec["correct"] += 1
+        await broadcast_game(room, sv, {"type": "event_scores", "cycle": cycle, "game": game, "leaderboard": _leaderboard(sv)})
+
+
+async def run_turn_game(app, room: Room, cycle: int, game: str, sv: dict) -> None:
+    """Turn-based party game (mime / pictionary). Each player performs for TURN_S seconds in a fixed order.
+    Only the *next* player's name is broadcast; the word is sent privately to the performer, who keeps it secret."""
+    import random
+    order = list(sv["optins"].keys())
+    random.shuffle(order)                                   # the order is fixed once, then hidden
+    break_s = room.timer["break_s"] if room.timer else TURN_S
+    max_turns = max(1, int((break_s - PREROLL_S) // TURN_S))
+    order = order[:max_turns]
+    sv["order"] = order
+    n = len(order)
+    pseudo = lambda uid: sv["optins"].get(uid, "?")
+    try:
+        await broadcast_game(room, sv, {"type": "game_start", "game": game, "total": n})
+        await broadcast_game(room, sv, {"type": "game_next", "game": game, "pseudo": pseudo(order[0]) if order else None})
+        await asyncio.sleep(PREROLL_S)
+        for i, uid in enumerate(order):
+            prompt_index = random.randrange(PROMPT_COUNT.get(game, 1))
+            sv["current"] = uid            # who is performing now (used to validate guesses)
+            sv["current_round"] = i
+            sv["solved_round"] = None       # one correct guess announced per round
+            if game == "pictionary":
+                sv["strokes"] = []          # a fresh canvas for each performer
+                await broadcast_game(room, sv, {"type": "draw", "op": "clear"})
+            m = room.members.get(uid)
+            if m is not None:
+                # the performer gets their secret prompt; the audience is told only who is next
+                await send(m, {"type": "game_your_turn", "game": game, "round": i, "total": n, "seconds": TURN_S, "prompt_index": prompt_index})
+            nxt = pseudo(order[i + 1]) if i + 1 < n else None
+            await broadcast_game(room, sv, {"type": "game_next", "game": game, "pseudo": nxt, "round": i, "total": n})
+            await asyncio.sleep(TURN_S)
+        await broadcast_game(room, sv, {"type": "game_over", "game": game, "leaderboard": _leaderboard(sv)})
+    except asyncio.CancelledError:
+        pass
+    finally:
+        sv["started"] = False
+        sv["current"] = None
+
+
+async def handle_turn_guess(room: Room, member: Member, data: dict) -> None:
+    """In mime / pictionary the performer's own client knows the word, so it judges incoming chat guesses and reports
+    a correct one. The server only confirms the reporter is the active performer, then announces the winner once."""
+    sv = _active_turn_subev(room, member.user_id)
+    if sv is None:
+        return
+    rnd = sv.get("current_round")
+    if sv.get("solved_round") == rnd:          # already announced for this round
+        return
+    guesser = _clean(data.get("pseudo"), 60)
+    winner = next((m for m in room.members.values() if m.pseudo == guesser), None)
+    if winner is None or winner.user_id == member.user_id or winner.user_id not in sv["optins"]:
+        return
+    sv["solved_round"] = rnd
+    rec = sv["scores"].setdefault(winner.user_id, {"pseudo": winner.pseudo, "score": 0, "correct": 0})
+    rec["score"] += 100
+    rec["correct"] += 1
+    await broadcast_game(room, sv, {"type": "game_guessed", "game": sv["game"], "pseudo": guesser,
+                                    "by": member.pseudo, "round": rnd, "leaderboard": _leaderboard(sv)})
+
+
+DRAW_MAX_OPS = 4000       # cap the per-turn stroke buffer so a long drawing cannot grow memory without bound
+
+
+def _pictionary_subev(room: Room, uid: int, *, performer: bool) -> dict | None:
+    """The live pictionary sub-event. performer=True → the member must be the one drawing now; else a watcher in it."""
+    for ev in room.events.values():
+        sv = ev["games"].get("pictionary")
+        if not sv or not sv.get("started") or sv.get("current") is None:
+            continue
+        if performer:
+            if sv["current"] == uid:
+                return sv
+        elif uid in sv["optins"]:
+            return sv
+    return None
+
+
+def _clamp_stroke(data: dict) -> dict | None:
+    """Shrink an incoming stroke to a small, safe shape: normalised points (0..1), bounded colour index and width."""
+    raw = data.get("pts")
+    if not isinstance(raw, list) or not raw:
+        return None
+    pts = [[round(min(1.0, max(0.0, float(q[0]))), 4), round(min(1.0, max(0.0, float(q[1]))), 4)]
+           for q in raw[:400]
+           if isinstance(q, (list, tuple)) and len(q) == 2 and all(isinstance(v, (int, float)) for v in q)]
+    if not pts:
+        return None
+    try:
+        c = int(data.get("c", 0))
+    except (TypeError, ValueError):
+        c = 0
+    try:
+        w = float(data.get("w", 0.006))
+    except (TypeError, ValueError):
+        w = 0.006
+    return {"pts": pts, "c": max(0, min(c, 11)), "w": round(min(0.08, max(0.001, w)), 4)}
+
+
+async def handle_draw(room: Room, member: Member, data: dict) -> None:
+    """Pictionary drawing relay. Only the current performer may draw; strokes go live to that game's players and are
+    kept for the turn so a late watcher can catch up (op 'sync'). The server never renders — it only relays points."""
+    op = data.get("op")
+    if op == "sync":  # a watcher just opened the board: replay this turn's strokes to them alone
+        sv = _pictionary_subev(room, member.user_id, performer=False)
+        if sv is not None:
+            await send(member, {"type": "draw", "op": "replay", "strokes": sv.get("strokes", [])})
+        return
+    sv = _pictionary_subev(room, member.user_id, performer=True)
+    if sv is None:
+        return
+    strokes = sv.setdefault("strokes", [])
+    if op == "clear":
+        strokes.clear()
+        await broadcast_game(room, sv, {"type": "draw", "op": "clear"})
+    elif op == "stroke":
+        s = _clamp_stroke(data)
+        if s is not None:
+            strokes.append(s)
+            del strokes[:-DRAW_MAX_OPS]
+            await broadcast_game(room, sv, {"type": "draw", "op": "stroke", **s})
 
 
 async def handle_rtc(app, room: Room, member: Member, kind: str, data: dict) -> None:
@@ -322,7 +770,9 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
 
     if kind == "focus":
         value = data.get("focused")
+        room.update_trees(now)  # count the time since the last report under the OLD state first
         member.focused = value if isinstance(value, bool) else None
+        room.update_trees(now)  # a newly focused forest member may plant a tree
         schedule_presence(room)
         return
 
@@ -330,8 +780,35 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
         if kind == "reaction" and data.get("emoji") in REACTIONS and now - member.last_reaction > 1.0:
             member.last_reaction = now
             await broadcast(room, {"type": "reaction", "emoji": data["emoji"], "from": member.pseudo})
+        elif kind == "chat":
+            text = _clean(data.get("text"), 300)
+            if text and now - member.last_chat >= 0.4:
+                member.last_chat = now
+                await broadcast(room, {"type": "chat", "msg": {
+                    "id": f"c{int(now * 1000)}-{member.user_id}", "author": member.pseudo, "text": text, "ts": now}})
+        elif kind == "forest_join":
+            member.forest = True
+            ensure_forest_task(room)
+            room.update_trees(now)
+            schedule_presence(room, 0.2)
+        elif kind == "dm":
+            text = _clean(data.get("text"), 300)
+            target = _clean(data.get("to"), 60)
+            if text and target and now - member.last_chat >= 0.3:
+                member.last_chat = now
+                dest = next((o for o in room.members.values() if o.pseudo == target), None)
+                payload = {"type": "dm", "from": member.pseudo, "to": target, "text": text, "ts": now}
+                await send(member, payload)                      # echo to the sender's own thread
+                if dest is not None and dest is not member:
+                    await send(dest, payload)
+        elif kind in ("mime_guess", "turn_guess"):
+            await handle_turn_guess(room, member, data)
+        elif kind == "draw":
+            await handle_draw(room, member, data)
         elif kind in ("rtc_join", "rtc_leave", "rtc_signal"):
             await handle_rtc(app, room, member, kind, data)
+        elif kind in ("event_optin", "event_optout", "event_start", "game_result"):
+            await handle_event(app, room, member, kind, data)
         return
 
     # ---- group-only messages
@@ -349,6 +826,7 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
         msg = {"id": f"{int(now * 1000)}-{room.msg_total}", "author": "Anonymous" if anonymous else member.pseudo, "text": text, "ts": now, "anon": anonymous}
         room.chat.append(msg)
         del room.chat[:-100]
+        log_message(app, room.code, "chat", msg["author"], text)
         await broadcast(room, {"type": "chat", "msg": msg})
         schedule_presence(room, 0.5)
         await nudge_quiet_members(room, now)
@@ -357,6 +835,8 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
         topic = _clean(data.get("topic"), 160)
         if len(topic) >= 2 and topic != room.topic:
             room.topic, room.explanation, room.quiz, room.results, room.answers = topic, None, None, None, {}
+            log_message(app, room.code, "topic", "", topic)
+            app.state.db.execute("UPDATE rooms SET topic=? WHERE code=?", (topic, room.code))  # saved rooms keep their topic
             await broadcast(room, {"type": "topic", "topic": topic})
 
     elif kind == "timer_start":
@@ -371,7 +851,7 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
         room.timer = None
         await broadcast(room, {"type": "timer", "timer": None, "server_now": now})
 
-    elif kind in ("explain", "ask", "quiz_start") and room.busy is None and (wait := security.ai_budget(app, member.user_id)):
+    elif kind in ("explain", "ask", "quiz_start", "summarize") and room.busy is None and (wait := security.ai_budget(app, member.user_id)):
         await send(member, {"type": "ai_error", "kind": "rate", "message": security.rate_limit_message(member.lang, wait), "retry_after": int(wait) + 1})
 
     elif kind == "explain":
@@ -407,6 +887,11 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
     elif kind == "quiz_reveal" and room.quiz is not None and room.results is None:
         await reveal(app, room)
 
+    elif kind == "summarize" and room.busy is None:
+        room.busy = "summary"
+        asyncio.create_task(run_summary(app, room, member.lang))
+        await broadcast(room, {"type": "busy", "what": "summary"})
+
 
 async def nudge_quiet_members(room: Room, now: float) -> None:
     """The mediator: private, zero-cost (no AI call), never public. Quiet members get a gentle invitation."""
@@ -425,6 +910,7 @@ async def run_ask(app, room: Room, question: str, asker: str, lang: str = "en") 
         entry = {**result, "asker": asker}
         room.qa_log.append(entry)
         del room.qa_log[:-20]
+        log_message(app, room.code, "answer", asker, f"{question} → {result['answer'][:400]}")
         await broadcast(room, {"type": "answer", "data": entry})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
@@ -444,6 +930,7 @@ async def run_explain(app, room: Room, lang: str = "en") -> None:
             context = [c for c in found if c["score"] >= app.state.settings.min_similarity] or None
         result = await pipeline.explain(app.state.gateway, room.topic, "balanced", context=context, lang=lang)
         room.explanation = result
+        log_message(app, room.code, "explanation", "", f"{result['title']} — {result.get('summary', '')}")
         await broadcast(room, {"type": "explanation", "data": result})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
@@ -458,6 +945,24 @@ async def run_quiz(app, room: Room, lang: str = "en") -> None:
         questions, _ = await pipeline.get_quiz(app.state.gateway, room.topic, level, lang)
         room.quiz, room.answers, room.results = questions, {}, None
         await broadcast(room, {"type": "quiz", "quiz": room.quiz_public()})
+    except (AIError, ValueError) as exc:
+        await broadcast_ai_error(room, exc)
+    finally:
+        room.busy = None
+        await broadcast(room, {"type": "busy", "what": None})
+
+
+async def run_summary(app, room: Room, lang: str = "en") -> None:
+    try:
+        transcript = transcript_text(app.state.db, room.code)
+        if len(transcript) < 20:
+            await broadcast(room, {"type": "summary", "summary": {"text": "", "at": 0}, "empty": True})
+            return
+        out = await pipeline.summarise_session(app.state.gateway, room.topic, transcript, lang)
+        now = time.time()
+        room.summary, room.summary_at = out["summary"], now
+        app.state.db.execute("UPDATE rooms SET summary=?, summary_at=? WHERE code=?", (room.summary, now, room.code))
+        await broadcast(room, {"type": "summary", "summary": {"text": room.summary, "at": now}})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
     finally:

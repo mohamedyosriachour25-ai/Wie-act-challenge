@@ -31,11 +31,15 @@ class Settings:
     min_similarity: float = 0.1       # below this a passage is not considered relevant (tune for the real embeddings)
     max_concurrent: int = 2           # the service caps concurrent requests per key
     cache_ttl_s: int = 6 * 3600
+    semantic_cache: bool = True        # reuse a result for a near-duplicate request (embeddings-based)
+    sem_threshold: float = 0.86        # cosine above which an explanation is reused
+    sem_threshold_ask: float = 0.93    # stricter for material questions: a small wording change can change intent
+    quiz_verify: bool = True           # draft-then-revise: a compact pass reviews the mid-size quiz draft
     max_quota_wait_s: float = 45.0    # longer than this and we tell the user instead of blocking
     db_path: str = "ednova.db"
     secret: str = "dev-secret-change-me"
     mock_latency_scale: float = 1.0
-    live_capacity: int = 200
+    live_capacity: int = 500          # the public space (presence + chat) holds many; cameras are capped below
     env: str = "development"          # "production" refuses to start with a weak secret and hides /docs
     log_level: str = "INFO"
     trust_proxy: bool = False         # honour X-Forwarded-For (only behind your own reverse proxy)
@@ -43,7 +47,9 @@ class Settings:
     login_attempts: int = 8           # failed sign-ins per 5 minutes, per connection and per pseudo
     register_per_hour: int = 15       # accounts created per connection per hour
     max_body_bytes: int = 4 * 1024 * 1024
-    video_capacity: int = 6           # how many cameras may share one Live room at once (mesh WebRTC)
+    video_capacity: int = 9           # cameras sharing one room at once (peer-to-peer mesh; an SFU would lift this)
+    event_lead_s: int = 300           # how long before a break the group-game invite opens (clamped to the focus length)
+    event_min_players: int = 2        # a group game needs at least this many people who opted in
 
     @property
     def is_production(self) -> bool:
@@ -76,6 +82,10 @@ def load_settings(**overrides) -> Settings:
         min_similarity=float(env("EDNOVA_MIN_SIMILARITY", "0.1")),
         max_concurrent=int(env("EDNOVA_MAX_CONCURRENT", "2")),
         cache_ttl_s=int(env("EDNOVA_CACHE_TTL_S", str(6 * 3600))),
+        semantic_cache=env("EDNOVA_SEMANTIC_CACHE", "1") != "0",
+        sem_threshold=float(env("EDNOVA_SEM_THRESHOLD", "0.86")),
+        sem_threshold_ask=float(env("EDNOVA_SEM_THRESHOLD_ASK", "0.93")),
+        quiz_verify=env("EDNOVA_QUIZ_VERIFY", "1") != "0",
         max_quota_wait_s=float(env("EDNOVA_MAX_QUOTA_WAIT_S", "45")),
         db_path=env("EDNOVA_DB", "ednova.db"),
         secret=env("EDNOVA_SECRET", "dev-secret-change-me"),
@@ -87,7 +97,9 @@ def load_settings(**overrides) -> Settings:
         user_ai_per_min=int(env("EDNOVA_USER_AI_PER_MIN", "20")),
         login_attempts=int(env("EDNOVA_LOGIN_ATTEMPTS", "8")),
         register_per_hour=int(env("EDNOVA_REGISTER_PER_HOUR", "15")),
-        video_capacity=int(env("EDNOVA_VIDEO_CAPACITY", "6")),
+        video_capacity=int(env("EDNOVA_VIDEO_CAPACITY", "9")),
+        event_lead_s=int(env("EDNOVA_EVENT_LEAD_S", "300")),
+        event_min_players=int(env("EDNOVA_EVENT_MIN_PLAYERS", "2")),
     )
     settings = dataclasses.replace(settings, **overrides) if overrides else settings
     problems = settings.production_problems()

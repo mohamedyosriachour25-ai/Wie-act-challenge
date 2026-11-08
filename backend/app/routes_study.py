@@ -212,6 +212,27 @@ def quiz_finish(body: FinishBody, request: Request):
     return {"ok": True}
 
 
+@router.post("/study/resume")
+async def resume_sheet(request: Request):
+    """Build a revision sheet from the topics the learner has recently studied (student-triggered)."""
+    user = current_user(request)
+    security.spend_ai(request, user["id"])
+    db = request.app.state.db
+    rows = db.all(
+        "SELECT topic, MAX(ts) AS last FROM events WHERE user_id=? GROUP BY topic ORDER BY last DESC LIMIT 12",
+        (user["id"],),
+    )
+    topics = [r["topic"] for r in rows]
+    try:
+        result = await pipeline.revision_sheet(request.app.state.gateway, topics, lang=lang_of(request))
+    except ValueError as exc:
+        raise HTTPException(400, tr(lang_of(request), str(exc)))
+    except AIError as exc:
+        return ai_error_response(exc, lang_of(request))
+    log_event(request, user["id"], "resume", "revision sheet")
+    return result
+
+
 @router.get("/progress")
 def progress(request: Request):
     user = current_user(request)

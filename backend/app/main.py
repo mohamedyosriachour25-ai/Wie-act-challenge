@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, materials, rooms, routes_study, security
+from . import auth, materials, review, rooms, routes_study, security
 from .ai.gateway import Gateway
 from .ai.mock_api import build_mock
 from .config import Settings, load_settings
@@ -52,6 +52,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.include_router(mock_router)
         transport = httpx.ASGITransport(app=app)  # the gateway talks to the fake service in-process
     app.state.gateway = Gateway(s, transport)
+    from .ai.semcache import SemanticCache
+    app.state.gateway.semcache = SemanticCache(app.state.gateway, s)
 
     if s.is_mock:
         log.warning("running on the built-in fake AI service (EDNOVA_BASE_URL=mock): lessons are canned")
@@ -61,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(routes_study.router)
     app.include_router(materials.router)
     app.include_router(rooms.router)
+    app.include_router(review.router)
 
     @app.get("/api/health")
     def health():

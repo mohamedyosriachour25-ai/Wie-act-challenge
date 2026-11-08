@@ -96,6 +96,8 @@ _T: dict[str, tuple[str, str, str]] = {
     "The model's answer could not be read. Rephrase the topic and try again.": (
         "La réponse du modèle n'a pas pu être lue. Reformulez le sujet et réessayez.", "تعذّرت قراءة إجابة النموذج. أعد صياغة الموضوع وحاول مرة أخرى.", "ما نجمتش نقرا جواب الموديل. بدّل صياغة الموضوع وعاود."),
     "The quiz could not be generated. Try again.": ("Le quiz n'a pas pu être généré. Réessayez.", "تعذّر إنشاء الاختبار. حاول مرة أخرى.", "ما نجمتش نعمل الكويز. عاود."),
+    "Study a few topics first, then generate a revision sheet.": (
+        "Étudie d'abord quelques sujets, puis génère une fiche de révision.", "ادرس بعض المواضيع أولاً ثم أنشئ ورقة مراجعة.", "اقرا شوية مواضيع الأول، من بعد اعمل ورقة مراجعة."),
     # diagnostic
     "A new formula appears in class. What helps you most first?": (
         "Une nouvelle formule apparaît en cours. Qu'est-ce qui vous aide le plus d'abord ?", "ظهرت صيغة جديدة في الحصة. ما الذي يساعدك أكثر في البداية؟", "طلعت formule جديدة في الكلاس. شنوة اللي يعاونك أكثر في الأول؟"),
@@ -126,6 +128,9 @@ _T: dict[str, tuple[str, str, str]] = {
     "Something went wrong on our side. Try again in a moment.": ("Un problème est survenu de notre côté. Réessayez dans un instant.", "حدث خطأ من جانبنا. حاول مرة أخرى بعد قليل.", "صار مشكل من عندنا. عاود جرّب بعد شوية."),
     "That image could not be read. Use a PNG, JPG, WebP or GIF.": ("Cette image n'a pas pu être lue. Utilisez un PNG, JPG, WebP ou GIF.", "تعذّر قراءة هذه الصورة. استخدم PNG أو JPG أو WebP أو GIF.", "ما نجّمناش نقراو الصورة هذي. استعمل PNG ولا JPG ولا WebP ولا GIF."),
     "You can keep {n} images here. Remove one first.": ("Vous pouvez garder {n} images ici. Supprimez-en une d'abord.", "يمكنك الاحتفاظ بـ{n} صور هنا. احذف واحدة أولًا.", "تنجم تخلّي {n} صور هوني. امسح وحدة قبل."),
+    "Live focus rooms are not saved as conversations.": ("Les salles de concentration en direct ne sont pas enregistrées comme conversations.", "لا تُحفظ غرف التركيز المباشرة كمحادثات.", "غرف التركيز المباشرة ما تتحفظش كمحادثات."),
+    "Unknown grade.": ("Note inconnue.", "تقييم غير معروف.", "تقييم ما معروفش."),
+    "That card does not exist.": ("Cette carte n'existe pas.", "هذه البطاقة غير موجودة.", "البطاقة هذي ما موجودةش."),
 }
 
 CATALOG: dict[str, dict[str, str]] = {

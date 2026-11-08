@@ -22,7 +22,7 @@ def literals() -> set[str]:
     for path in APP.rglob("*.py"):
         if path.name in ("i18n.py",) or "mock" in path.name:
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
                 continue
             name = getattr(node.func, "id", getattr(node.func, "attr", ""))
@@ -38,7 +38,7 @@ def literals() -> set[str]:
     for d in DIAGNOSTIC:
         found.add(d["q"])
         found.update(o[0] for o in d["options"])
-    src = (APP / "materials.py").read_text()
+    src = (APP / "materials.py").read_text(encoding="utf-8")
     found.update(re.findall(r'return "(This looks like[^"]+)"', src))
     found.add("Material is sent to the AI service, so remove personal details and add it again.")
     # dynamic messages are translated as a family, not literally
@@ -120,3 +120,4 @@ def test_room_members_get_errors_and_nudges_in_their_own_language(client):
 def test_status_carries_a_code_the_interface_can_translate(client):
     s = client.get("/api/ai/status").json()
     assert "code" in s and "cls" in s
+

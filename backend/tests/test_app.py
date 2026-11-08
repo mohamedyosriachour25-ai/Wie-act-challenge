@@ -124,7 +124,7 @@ def test_group_room_shares_one_explanation_and_a_quiz(client):
         results = recv_until(b, "quiz_results")["results"]
         assert results["questions"][0]["picks"][:3] == [1, 0, 1]
         assert results["scores"][0] == {"pseudo": "alice", "correct": 1, "total": 4}
-    assert client.get("/api/ai/metrics").json()["calls"]["mid"] == 2  # one explanation, one quiz, for both people
+    assert client.get("/api/ai/metrics").json()["calls"]["mid"] == 1  # only the explanation uses the mid model (figure); the quiz is compact now
 
 
 def test_live_room_follows_a_fixed_schedule_and_counts_focus(client):

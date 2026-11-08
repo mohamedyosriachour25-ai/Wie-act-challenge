@@ -205,6 +205,16 @@ def complete(messages: list[dict]) -> str:
         return _answer(user)
     if task == "quiz":
         return json.dumps(_quiz(topic))
+    if task == "quiz_check":  # reviewer: echo the draft if it is well formed, else regenerate a clean quiz
+        m = re.search(r"DRAFT QUIZ:\s*(\{.*\})\s*$", user, re.S)
+        if m:
+            try:
+                draft = json.loads(m.group(1))
+                if isinstance(draft.get("questions"), list) and len(draft["questions"]) >= 3:
+                    return json.dumps(draft)
+            except json.JSONDecodeError:
+                pass
+        return json.dumps(_quiz(topic))
     if task == "hint":
         level = int((re.search(r"HINT_LEVEL:\s*(\d)", user) or [0, 1])[1])
         return {
@@ -212,6 +222,26 @@ def complete(messages: list[dict]) -> str:
             2: "Name the key idea or rule from the explanation that connects what you know to what you need.",
             3: "Write the first step only: put the known values into the rule, and leave the last step for you.",
         }.get(level, "Try the first step.")
+    if task == "summary":
+        topic = _topic(user)
+        return (
+            f"- The room worked on {topic}.\n"
+            "- Key points from the explanation were reviewed together.\n"
+            "- Members discussed the topic and tried the shared quiz.\n"
+            "- Open question: revisit the trickiest step next session."
+        )
+    if task == "resume":
+        topics = [ln[2:].strip() for ln in user.splitlines() if ln.startswith("- ")]
+        parts = []
+        for t in topics or [topic]:
+            lesson = _lesson(t)
+            parts.append(
+                f"## {t}\n"
+                f"- {lesson['summary']}\n"
+                "- Review the key definition and one worked example.\n"
+                "- Try a quick self-test to check recall."
+            )
+        return "\n\n".join(parts)
     if task == "repair":
         return user
     return "OK"
