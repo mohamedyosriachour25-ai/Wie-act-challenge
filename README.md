@@ -25,7 +25,7 @@ npm run dev                   # http://localhost:5173, proxies /api and /ws to :
 npm run build                 # then the backend serves frontend/dist on :8000 by itself
 ```
 
-Tests: `cd backend && python -m pytest -q` (73 backend tests, including orchestration and translation coverage) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija).
+Tests: `cd backend && python -m pytest -q` (100 backend tests, including orchestration and translation coverage) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija).
 
 ## Connect the real service
 
@@ -69,11 +69,19 @@ React (Vite)  <--REST + WebSocket-->  FastAPI  -->  AI gateway  -->  inference s
 | Hints (3 levels, never the final answer) | compact | short targeted text |
 | Pick the relevant passages when more than 3 match a question | compact | cheap filtering before the answer |
 | **Answer a question from course material**, with [n] citations | **compact** | the answer is text written from a few retrieved passages |
-| Quiz generation | mid-size | synthesis, one call per topic, shared by everyone |
+| Quiz generation + review | compact | a compact draft reviewed by a second compact pass; the mid model is kept for figures |
 | Fix malformed JSON | compact | formatting, only when needed |
 | Any mid-size step when that class is saturated | compact | fallback, announced to the user |
 
 An explanation costs three calls: `route` (compact) and `illustrate` (mid-size) run in parallel, then `explain` (compact) is written around the validated figure. If the illustration is unusable, a concept map is built from the key points and the explanation still gets a figure. The note "Why this figure" shows the learner the reasoning behind the picture.
+
+### AI optimisation
+
+Two optimisations beyond the base orchestration:
+
+- **Semantic cache.** The gateway already serves byte-identical calls from its cache. On top of that, an explanation or a material answer is reused when a *new request means the same thing* as a recent one — "explain Thales" vs "Thales theorem" — matched with the embeddings endpoint (its own, cheaper quota). A hit skips every generation call; a miss costs one embedding and is remembered. Reuse is scoped by task, language and (for explanations) learning style; grounded material answers are scoped by collection **and a version token**, so adding or removing a document invalidates reuse. Grounded explanations are never reused. Counted in metrics as `semantic_hits`. Tune `EDNOVA_SEM_THRESHOLD` (0.86) and `EDNOVA_SEM_THRESHOLD_ASK` (0.93); turn it off with `EDNOVA_SEMANTIC_CACHE=0`.
+- **Quiz draft-then-revise.** The quiz is drafted by the mid-size model (synthesis) and then reviewed by the compact model (checking): the reviewer corrects a wrong answer key, weak or duplicate distractors, and drops any question without a single defensible answer. It can only keep or improve the draft — if the review fails or is empty, the draft is used unchanged. Costs one extra compact call per quiz; turn it off with `EDNOVA_QUIZ_VERIFY=0`.
+- **Output reliability.** Route, illustrate and quiz prompts carry a worked example (few-shot) and an explicit JSON schema, and when a model's JSON still fails to parse or validate, the repair pass is **schema-aware** (it is told the exact shape to produce), which recovers far more answers than a generic "fix this JSON" and keeps malformed-output failures and fallbacks down.
 
 ### Languages
 
@@ -107,9 +115,21 @@ Safeguards: uploads that look like they contain e-mail addresses or phone number
 
 The model never draws. It picks a template (`thales`, `function_plot`, `process_flow`, `concept_map`) and fills in parameters. The backend validates and clamps them, and React draws the figure. If the spec is unusable, a concept map is built from the explanation's own steps, so every explanation has an illustration. To add a template: a validator in `visuals.py`, a renderer in `frontend/src/visuals/`, a line in the catalogue and in `VisualSheet.jsx`.
 
+### Revision (spaced repetition)
+
+Every quiz a learner takes becomes a deck of flashcards (front: the question, back: the correct answer and why), with no extra AI call — the cards are built from the quiz already generated and cached. A **Revision** tab shows the cards that are due; the learner flips each one and grades recall (Again / Hard / Good / Easy), and an SM-2-style schedule brings each card back just before it would be forgotten. Cards are de-duplicated per learner, and the home progress shows how many are due. Endpoints under `/api/review` (`add_quiz`, `due`, `grade`, `stats`).
+
+### Saved study rooms
+
+A study room is saved as a conversation. Chat, topic changes, AI explanations and material answers are written to a transcript (`room_messages`) that survives a restart; a member who rejoins sees the whole conversation. A **Summarise** button asks the compact model for a short recap of the session (main topics, key points, open questions); the summary is stored on the room and shown to everyone. The transcript and summary are also available over REST at `GET /api/rooms/{code}/conversation`. Live focus rooms stay ephemeral and are not saved.
+
+### Group games on the break
+
+A public Live room runs an opt-in group game at each break. Because the Pomodoro timer is deterministic (epoch-aligned), every client derives the same schedule, so no server loop is needed: near the end of a focus block (the last `EDNOVA_EVENT_LEAD_S` seconds, default 300, clamped to fit the focus length) an invite appears; whoever opts in plays a shared trivia race on the break. The server owns the opt-in list and the live leaderboard (points for a correct answer plus a speed bonus); only people who opted in for that cycle score. Three games ship: a **quiz** (trivia race, simultaneous, scored) and two **turn-based** games, **karaoke** and **mime**. In a turn game each player gets 30 s in a fixed, hidden order — only the *next* player's name is ever announced (the mime word is sent privately to the performer) — and the active player can go on stage with camera and microphone through the same WebRTC mesh. The first person to opt in picks the game for that break. Turn games are driven by a short server task (started when a client reports the break began); the quiz stays clock-driven. A seeded fast-cycle room `LIVE-DEMO` (1-minute focus/break) lets you see focus → break → game in under two minutes — handy for the demo.
+
 ### Camera in Live rooms
 
-A Live room can turn into a shared camera wall. Turning your camera on is opt-in and off by default; you then see everyone else who is also sharing (it is reciprocal). The video is **peer to peer** over WebRTC: it never passes through the server, which only relays the small SDP/ICE signalling messages over the room's existing WebSocket, using the "perfect negotiation" pattern so two browsers can connect without clashing. `EDNOVA_VIDEO_CAPACITY` (default 6) caps how many cameras share one room at once. This is a mesh, so it is meant for a handful of people; many publishers, or peers on different networks behind strict NATs, would need an SFU and a TURN server. The on-device focus signal is unchanged and still uses no camera.
+A Live room can turn into a shared camera wall. Turning your camera on is opt-in and off by default; you then see everyone else who is also sharing (it is reciprocal). The video is **peer to peer** over WebRTC: it never passes through the server, which only relays the small SDP/ICE signalling messages over the room's existing WebSocket, using the "perfect negotiation" pattern so two browsers can connect without clashing. The public space (presence + chat) holds up to `EDNOVA_LIVE_CAPACITY` people (default 500), while `EDNOVA_VIDEO_CAPACITY` (default 9) caps how many cameras share the mesh at once. This is a mesh, so it is meant for a handful of people; many publishers, or peers on different networks behind strict NATs, would need an SFU and a TURN server. The on-device focus signal is unchanged and still uses no camera.
 
 ## Deploy
 
@@ -134,7 +154,13 @@ Without Docker: `npm run build` in `frontend`, then `EDNOVA_ENV=production EDNOV
 | `EDNOVA_LOGIN_ATTEMPTS` | 8 | failed sign-ins per 5 min per pseudo (5x per connection) |
 | `EDNOVA_REGISTER_PER_HOUR` | 15 | accounts created per connection per hour |
 | `EDNOVA_TRUST_PROXY` | 0 | read the client address from `X-Forwarded-For` |
-| `EDNOVA_VIDEO_CAPACITY` | 6 | cameras allowed on one Live-room wall at once |
+| `EDNOVA_LIVE_CAPACITY` | 500 | people allowed in one public Live room (presence + chat) |
+| `EDNOVA_VIDEO_CAPACITY` | 9 | cameras sharing one Live-room mesh at once |
+| `EDNOVA_EVENT_LEAD_S` | 300 | how long before a break the group-game invite opens |
+| `EDNOVA_EVENT_MIN_PLAYERS` | 2 | players needed for a group game |
+| `EDNOVA_SEMANTIC_CACHE` | 1 | reuse near-duplicate requests via embeddings (0 to disable) |
+| `EDNOVA_SEM_THRESHOLD` / `_ASK` | 0.86 / 0.93 | cosine thresholds for explanation / material-answer reuse |
+| `EDNOVA_QUIZ_VERIFY` | 1 | compact reviewer checks the quiz draft (0 to disable) |
 | `EDNOVA_MAX_CONCURRENT`, `EDNOVA_MIN_SIMILARITY`, `EDNOVA_MAX_QUOTA_WAIT_S`, `EDNOVA_CACHE_TTL_S` | 2, 0.1, 45, 6 h | gateway tuning |
 | `EDNOVA_DB`, `EDNOVA_LOG_LEVEL` | `ednova.db`, `INFO` | |
 

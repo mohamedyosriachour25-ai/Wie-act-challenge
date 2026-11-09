@@ -5,6 +5,12 @@ import os
 BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
 SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
 problems = []
+def poll(page, expr, ms=20000):
+    import time as _t; end=_t.time()+ms/1000
+    while _t.time()<end:
+        if page.evaluate(expr): return True
+        page.wait_for_timeout(200)
+    return False
 
 def note(msg):
     print(msg, flush=True)
@@ -45,11 +51,11 @@ with sync_playwright() as p:
     page.wait_for_selector("text=Your learning style")
     page.screenshot(path=f"{SHOTS}/02-diagnostic-result.png")
     page.get_by_role("button", name="Start studying").click()
-    page.wait_for_selector("form.ask")
+    page.wait_for_selector(".welcome")
 
     # ---- Explain Thales
     page.get_by_role("button", name="Thales theorem").click()
-    page.wait_for_selector(".loader")
+    page.wait_for_selector(".thinking")
     page.screenshot(path=f"{SHOTS}/03-loading.png")
     page.wait_for_selector(".explain", timeout=20000)
     page.wait_for_timeout(400)
@@ -80,21 +86,26 @@ with sync_playwright() as p:
 
     # ---- Other templates
     for topic, tmpl in [("Quadratic functions", "interactive graph"), ("Photosynthesis", "step-through"), ("Causes of the French Revolution", "concept map")]:
-        page.get_by_role("button", name=topic).click()
-        page.wait_for_selector(".explain", timeout=20000); page.wait_for_timeout(500)
-        cap = page.locator(".sheet-cap").inner_text().lower()
+        n_before = page.locator(".explain").count()
+        page.get_by_label("What do you want to understand?").fill(topic)
+        page.locator(".composer .send").click()
+        poll(page, f"document.querySelectorAll('.explain').length > {n_before}")
+        page.wait_for_timeout(500)
+        cap = page.locator(".sheet-cap").last.inner_text().lower()
         check(f"{topic} -> {tmpl}", tmpl in cap, cap.replace("\n", " "))
-        page.locator(".explain .sheet").screenshot(path=f"{SHOTS}/06-{topic.split()[0].lower()}.png")
+        page.locator(".explain .sheet").last.screenshot(path=f"{SHOTS}/06-{topic.split()[0].lower()}.png")
 
     # ---- Resilience demo: large model busy -> fallback
     page.get_by_role("button", name="AI").first.click()
     page.get_by_role("button", name="Make the large model busy").click()
     page.keyboard.press("Escape")
     page.get_by_label("What do you want to understand?").fill("How does a transistor switch work")
-    page.get_by_role("button", name="Explain it").click()
-    page.wait_for_selector(".loader")
-    page.wait_for_selector(".explain", timeout=30000)
-    txt = page.locator(".meta").first.inner_text()
+    n_before = page.locator(".explain").count()
+    page.locator(".composer .send").click()
+    page.wait_for_selector(".thinking")
+    poll(page, f"document.querySelectorAll('.explain').length > {n_before}", 30000)
+    page.wait_for_timeout(400)
+    txt = page.locator(".meta").last.inner_text()
     check("fallback is announced to the user", "larger model was busy" in txt, txt)
     page.get_by_role("button", name="AI").first.click()
     page.screenshot(path=f"{SHOTS}/07-ai-panel.png")

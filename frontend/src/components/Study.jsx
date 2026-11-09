@@ -113,6 +113,7 @@ export function SoloQuiz({ topic, level, onFinish }) {
   const [result, setResult] = useState(null);
   const [score, setScore] = useState(0);
   const [done, setDone] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   const load = async () => {
     setError(null);
@@ -132,7 +133,11 @@ export function SoloQuiz({ topic, level, onFinish }) {
   const advance = async () => {
     if (i + 1 < quiz.questions.length) { setI(i + 1); setPicked(null); setResult(null); return; }
     setDone(true);
-    try { await api("/api/study/quiz/finish", { method: "POST", body: { topic, correct: score, total: quiz.questions.length } }); onFinish?.(); } catch (e) { setError(e); }
+    try {
+      await api("/api/study/quiz/finish", { method: "POST", body: { topic, correct: score, total: quiz.questions.length } });
+      api("/api/review/add_quiz", { method: "POST", body: { topic, level } }).then(() => setSaved(true)).catch(() => {});  // these questions become review cards
+      onFinish?.();
+    } catch (e) { setError(e); }
   };
 
   if (error && !quiz) return <section className="panel"><h3>{t("Check yourself")}</h3><ErrorNote error={error} onRetry={load} /></section>;
@@ -146,6 +151,7 @@ export function SoloQuiz({ topic, level, onFinish }) {
         <div>
           <p className="score">{t("{score} of {total} correct", { score, total: quiz.questions.length })}</p>
           <p className="muted">{score === quiz.questions.length ? t("Solid. Try a harder topic or explain this one to someone.") : t("Re-read the steps you missed, then try again.")}</p>
+          {saved && <p className="muted small">{t("Added to your revision — review them from the Revision tab.")}</p>}
           <button className="btn" onClick={() => { setI(0); setPicked(null); setResult(null); setScore(0); setDone(false); }}>{t("Try again")}</button>
         </div>
       ) : (
@@ -231,11 +237,13 @@ export function Diagnostic({ onDone }) {
 export function ProgressPanel({ refreshKey }) {
   const t = useT();
   const [p, setP] = useState(null);
-  useEffect(() => { api("/api/progress").then(setP).catch(() => {}); }, [refreshKey]);
+  const [due, setDue] = useState(0);
+  useEffect(() => { api("/api/progress").then(setP).catch(() => {}); api("/api/review/stats").then((s) => setDue(s.due)).catch(() => {}); }, [refreshKey]);
   if (!p) return null;
   return (
     <section className="panel progress">
       <h3>{t("Your progress")}</h3>
+      {due > 0 && <a className="banner info" href="/review">{t("{n} cards to review", { n: due })}</a>}
       <dl className="stats three">
         <div className="stat"><dd>{p.xp}</dd><dt>{t("Points")}</dt></div>
         <div className="stat"><dd>{p.streak_days}</dd><dt>{t("Day streak")}</dt></div>

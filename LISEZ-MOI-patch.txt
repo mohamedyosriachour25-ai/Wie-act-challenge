@@ -1,0 +1,52 @@
+PATCH EdNova — Lots 1 + 2 (cumulatif)
+=====================================
+Ce patch contient TOUS les fichiers modifiés depuis la version d'origine.
+Copie le dossier « ednova » par-dessus le tien : venv, .env, ednova.db, node_modules
+et dist ne sont pas touchés.
+
+LOT 1 — Fiche de révision, chat live, messages privés, mime à deviner
+---------------------------------------------------------------------
+- Bouton « Fiche de révision » (étude solo) : l'IA résume sujet par sujet.
+- Chat en direct dans les salles publiques.
+- Messages privés (menu « Tout le monde / 🔒 pseudo »).
+- Mime : les autres devinent dans le chat ; « X a deviné ! 🎉 ».
+
+LOT 2 — Jeux par choix du joueur + Pictionary (nouveau)
+-------------------------------------------------------
+1. KARAOKÉ REMPLACÉ par « DESSINE & DEVINE » (Pictionary).
+   Tu avais choisi « chansons libres de droits », mais en pratique les chansons
+   du domaine public ne font pas un karaoké intéressant et je ne peux pas utiliser
+   de paroles protégées. J'ai donc mis un jeu plus solide et sans aucun problème de
+   droits : le joueur DESSINE le mot (sur papier/écran montré à la caméra), les
+   autres DEVINENT dans le chat. Si tu tiens vraiment au karaoké libre de droits,
+   dis-le-moi et je l'ajoute comme 4e jeu avec quelques chansons traditionnelles.
+
+2. CHAQUE JOUEUR CHOISIT SON JEU (plus de « premier arrivé décide », pas de vote).
+   - Pendant la phase focus, chacun clique le jeu qu'il préfère (Quiz / Mime /
+     Pictionary) ; il peut changer jusqu'au début de la pause.
+   - Tous ceux qui ont choisi le MÊME jeu jouent ENSEMBLE ; les différents jeux
+     tournent EN PARALLÈLE pendant la pause (un groupe quiz, un groupe mime, etc.).
+   - Chaque joueur ne voit que les messages de SON jeu.
+   - Le compteur sous chaque bouton montre combien de personnes ont choisi ce jeu.
+3. RESET À CHAQUE PAUSE : à chaque nouvelle pause, le choix est remis à zéro et
+   tout le monde re-choisit.
+
+ENCORE À FAIRE (lot suivant, déjà prévu)
+----------------------------------------
+- Détecteur d'attention par CAMÉRA (suivi du regard/présence de l'étudiant).
+- Salle « FORÊT » avec QR code (garder l'onglet ouvert pour faire pousser un arbre).
+- Interrupteur « recherche web » (références en ligne, nécessite une clé d'API).
+- Illustrations temps réel fidèles à tout sujet + tuteur « explique » avec transcription.
+- Rappel actif à la connexion (révision espacée 1 j / 3 j / 1 sem, cartes animées).
+
+COMMENT APPLIQUER
+-----------------
+1. Copie le dossier « ednova » de ce patch par-dessus ton dossier « ednova ».
+2. cd ednova/frontend && npm run build
+3. cd ../backend  (active ton venv)  &&  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+4. Ouvre http://127.0.0.1:8000
+
+VÉRIFS (optionnel)
+------------------
+- Tests backend :  cd ednova/backend && python -m pytest -q      (106 tests)
+- Traductions :    cd ednova/frontend && npm run i18n:check

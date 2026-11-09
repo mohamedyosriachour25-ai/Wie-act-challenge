@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, wsUrl } from "./api.js";
 import { useLang } from "./i18n.jsx";
+import { ATTENTION, createTracker, loadDetector } from "./attention.js";
 
 /** Poll the AI gateway status. Fast while a request is running, slow otherwise. */
 export function useAIStatus() {
@@ -89,21 +90,35 @@ export function useCycle(timer, now) {
 }
 
 /**
- * Focus signal computed entirely on this device. Today: tab visibility, window focus and recent input.
- * The camera-based version plugs in here later and keeps the same contract (a boolean, nothing else leaves).
+ * Focus signal computed entirely on this device: tab visibility, window focus and recent input.
+ * `camera` is the optional verdict of useAttention (true = facing the screen, false = away, null = no
+ * camera information). The contract is unchanged: a single boolean is all that ever leaves the device.
+ *  - camera === false  -> not focused (the learner has left or looked away for a while)
+ *  - camera === true   -> the input-idle rule is waived (reading a book or notes is still studying)
+ * `opts.idleMs` sets how long without input counts as idle (default 90 s; the study forest passes Infinity
+ * because there only the tab matters).
  */
-export function useFocusSignal(enabled) {
+export function useFocusSignal(enabled, camera = null, opts = {}) {
   const [focused, setFocused] = useState(null);
+  const cam = useRef(camera);
+  cam.current = camera;
+  const idleMs = useRef(opts.idleMs ?? 90_000);
+  idleMs.current = opts.idleMs ?? 90_000;
+  const recompute = useRef(null);
   useEffect(() => {
     if (!enabled) {
+      recompute.current = null;
       setFocused(null);
       return;
     }
     let lastInput = Date.now();
     const compute = () => {
-      const idle = Date.now() - lastInput > 90_000;
-      setFocused(document.visibilityState === "visible" && document.hasFocus() && !idle);
+      const idle = Date.now() - lastInput > idleMs.current;
+      const away = cam.current === false;
+      const seen = cam.current === true;
+      setFocused(document.visibilityState === "visible" && document.hasFocus() && !away && (seen || !idle));
     };
+    recompute.current = compute;
     const touch = () => {
       lastInput = Date.now();
     };
@@ -120,9 +135,93 @@ export function useFocusSignal(enabled) {
       window.removeEventListener("focus", compute);
       window.removeEventListener("blur", compute);
       clearInterval(id);
+      recompute.current = null;
     };
   }, [enabled]);
+  useEffect(() => { recompute.current?.(); }, [camera]); // a new camera verdict applies immediately
   return focused;
+}
+
+let detectorPromise = null; // the face model is loaded once per page session, only after opt-in
+
+/**
+ * Opt-in camera attention check, fully on-device. While `enabled && active` it opens the camera (video
+ * only, 320x240), looks at ~2 frames per second and reduces them to one verdict. Frames are never stored,
+ * drawn or sent anywhere. When `active` turns false (e.g. during the break) the camera is released.
+ * Returns { status, attentive, reason, backend }:
+ *   status: off | paused | loading | running | denied | unsupported | error
+ *   attentive: null (no verdict yet / not running) | true | false;  reason: starting | ok | no_face | turned
+ */
+export function useAttention(enabled, active = true) {
+  const idle = { attentive: null, reason: "starting", backend: null };
+  const [state, setState] = useState({ status: "off", ...idle });
+  useEffect(() => {
+    if (!enabled || !active) {
+      setState((s) => ({ status: enabled ? "paused" : "off", ...idle, backend: s.backend }));
+      return undefined;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setState({ status: "unsupported", ...idle });
+      return undefined;
+    }
+    let alive = true;
+    let stream = null;
+    let video = null;
+    let timer = null;
+    const tracker = createTracker();
+    const release = () => {
+      stream?.getTracks().forEach((tr) => tr.stop());
+      stream = null;
+      if (video) video.srcObject = null;
+    };
+    (async () => {
+      setState((s) => ({ status: "loading", ...idle, backend: s.backend }));
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: "user" }, audio: false });
+      } catch {
+        if (alive) setState({ status: "denied", ...idle });
+        return;
+      }
+      if (!alive) return release();
+      let detector;
+      try {
+        detector = await (detectorPromise ||= loadDetector());
+      } catch {
+        detectorPromise = null;
+        release();
+        if (alive) setState({ status: "error", ...idle });
+        return;
+      }
+      if (!alive) return release();
+      video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+      setState({ status: "running", ...idle, backend: detector.backend });
+      const loop = async () => {
+        if (!alive) return;
+        const t0 = performance.now();
+        if (document.visibilityState === "visible" && video.readyState >= 2 && video.videoWidth) {
+          try {
+            const v = tracker.update({ t: performance.now(), face: await detector.analyse(video) });
+            if (alive) setState((s) => (s.status === "running" && s.attentive === v.attentive && s.reason === v.reason ? s : { status: "running", attentive: v.attentive, reason: v.reason, backend: detector.backend }));
+          } catch { /* one bad frame is skipped */ }
+        } else {
+          tracker.pause();
+        }
+        if (alive) timer = setTimeout(loop, Math.max(100, ATTENTION.sampleMs - (performance.now() - t0)));
+      };
+      loop();
+    })();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      release();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, active]);
+  return state;
 }
 
 export const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -212,11 +311,11 @@ export function useVideoMesh(send, myId) {
     setCameraOn(false);
   }
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (audio = false) => {
     setError(null);
     setStarting(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio });
       local.current = stream;
       setLocalStream(stream);
       setCameraOn(true);
@@ -229,9 +328,12 @@ export function useVideoMesh(send, myId) {
   }, []);
 
   const toggle = useCallback(() => {
-    if (cameraOn) { sendRef.current({ type: "rtc_leave" }); stop(); } else { start(); }
+    if (cameraOn) { sendRef.current({ type: "rtc_leave" }); stop(); } else { start(false); }
   }, [cameraOn, start]);
 
+  const perform = useCallback(() => { if (!cameraOn) start(true); }, [cameraOn, start]);       // go on stage: camera + mic
+  const leaveStage = useCallback(() => { if (cameraOn) { sendRef.current({ type: "rtc_leave" }); stop(); } }, [cameraOn]);
+
   useEffect(() => () => { sendRef.current?.({ type: "rtc_leave" }); stop(); }, []); // leave on unmount
-  return { cameraOn, starting, error, tiles, localStream, toggle, signal };
+  return { cameraOn, starting, error, tiles, localStream, toggle, perform, leaveStage, signal };
 }

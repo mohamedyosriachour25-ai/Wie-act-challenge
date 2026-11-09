@@ -1,0 +1,104 @@
+EdNova — project directory tree (annotated)
+Generated 2026-11-08 from the actual repository.
+Excluded from this tree: backend/venv, frontend/node_modules, frontend/dist (build output),
+__pycache__, .pytest_cache, *.db, .git. Those are generated or secret and are not committed.
+
+ednova/
+├── README.md                     Run / connect-real-service / architecture notes (authoritative quickstart)
+├── Dockerfile                    2-stage build: node builds the SPA, python serves it (one image)
+├── docker-compose.yml            Single service "ednova"; reads ./.env; EDNOVA_ENV=production
+├── .dockerignore / .gitignore    Build/commit exclusions (venv, node_modules, dist, .env, *.db)
+├── .env.example                  Root env template (used by docker compose)
+├── .github/workflows/ci.yml      CI: pytest (py3.12/3.13) + i18n:check + vite build + docker build & healthcheck
+│
+├── backend/                      FastAPI application (Python)
+│   ├── requirements.txt          fastapi, uvicorn[standard], httpx, websockets, pypdf
+│   ├── requirements-dev.txt      -r requirements.txt + pytest
+│   ├── pytest.ini                pytest config
+│   ├── .env.example              Backend env template (copy to backend/.env for local non-docker runs)
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── main.py               ENTRY POINT. create_app(): wires settings, DB, Hub, gateway, routers,
+│   │   │                         mounts built SPA (frontend/dist), /api/health, lifespan (resume indexing).
+│   │   │                         Module-level `app = create_app()` is what uvicorn imports.
+│   │   ├── config.py             Settings dataclass + load_settings(): ALL config from env (.env auto-loaded).
+│   │   ├── db.py                 SQLite wrapper (WAL), SCHEMA (all tables), lightweight migrations, seed_live_rooms.
+│   │   ├── auth.py               Register/login/me. scrypt password hashing; HMAC-signed bearer token. current_user().
+│   │   ├── security.py           Guard middleware, SlidingWindow rate limiter, logging setup, spend_ai(), password checks.
+│   │   ├── i18n.py               Server-side translation catalog (tr()) + lang_of(); FR/AR/Darija for server strings.
+│   │   ├── routes_study.py       Solo study endpoints: diagnostic, explain, hint, quiz(+answer/finish), resume,
+│   │   │                         progress, ai/status, ai/metrics, ai/simulate. log_event() writes to `events`.
+│   │   ├── materials.py          RAG: upload (raw body + X-Filename), background indexing, chunking, embeddings,
+│   │   │                         similarity search, /raw blob serving, /ask (grounded answer). Images stored as blobs.
+│   │   ├── review.py             Spaced repetition (SM-2). /api/review add_quiz, due, grade, stats. schedule().
+│   │   ├── rooms.py              Group rooms + Live rooms. REST (list/create/get/conversation) + WebSocket /ws/rooms/{code}.
+│   │   │                         Hub (in-memory room registry), Room, Member, presence, chat, DM, WebRTC relay,
+│   │   │                         pomodoro timer, break games (trivia/mime/pictionary), summaries.
+│   │   └── ai/
+│   │       ├── gateway.py        The ONLY code that talks to the inference service. Routing, retries, quota wait,
+│   │       │                     503→compact fallback, concurrency cap, metrics, embeddings. Holds semcache.
+│   │       ├── pipeline.py       Study steps and which model class runs each: explain, hint, get_quiz, ask_material,
+│   │       │                     summarise_session, revision_sheet, public_quiz. Schema validation of model JSON.
+│   │       ├── prompts.py        System/user prompt builders + JSON schemas + few-shot examples per task.
+│   │       ├── visuals.py        Validation/normalisation of illustration specs the model returns.
+│   │       ├── semcache.py       Embeddings-based semantic cache (reuse near-duplicate requests).
+│   │       ├── mock_api.py       Builds the in-process fake inference service (OpenAI-compatible routes).
+│   │       └── mock_llm.py       The fake model: canned, task-aware JSON/text replies (TASK: <name> dispatch).
+│   └── tests/                    pytest suite (132 tests total)
+│       ├── test_app.py           Auth + core HTTP/WS happy paths
+│       ├── test_orchestration.py Model routing (mid=figures, compact=text), fallback
+│       ├── test_gateway.py       Gateway: retries, quota, concurrency, cache, metrics
+│       ├── test_ai_optim.py      Semantic cache, in-flight merge, schema repair
+│       ├── test_materials.py     RAG upload/index/search, images, PDFs, personal-data guard
+│       ├── test_features.py      Live rooms: camera relay, chat, DM, games (trivia/mime/pictionary), resume
+│       ├── test_forest.py        Study forest: tree growth/wilt/plant rules (fake clocks) + WebSocket flow
+│       ├── test_draw.py          Pictionary drawing relay (performer-only, late-watcher sync, clamping) + game opt-out
+│       ├── test_review.py        SM-2 scheduling + endpoints
+│       ├── test_hardening.py     Rate limits, auth edge cases, production refusals
+│       └── test_i18n.py          Every server string translated FR/AR/Darija
+│
+├── frontend/                     React + Vite single-page app (JavaScript/JSX)
+│   ├── package.json              react, react-dom, react-router-dom, @fontsource/*; scripts: dev/build/preview/i18n:check
+│   ├── vite.config.js            Dev server proxies /api and /ws to :8000
+│   ├── index.html                SPA host page
+│   ├── scripts/i18n-check.mjs    Fails the build if any UI sentence is missing OR unused in FR/AR/Darija
+│   ├── scripts/attention-test.mjs  Unit tests for the pure attention-tracker logic (npm run attention:test; runs in CI)
+│   ├── scripts/qr-test.mjs         Unit tests for the QR generator; decodes the output with jsQR (npm run qr:test; runs in CI)
+│   ├── public/models/            Self-hosted face models (BlazeFace + FaceMesh, ~2 MB, MIT) for the opt-in attention check
+│   └── src/
+│       ├── main.jsx              React root
+│       ├── App.jsx               Routes: / /study /rooms /rooms/:code /live /live/:code /forest /forest/:code /review + navbar
+│       ├── styles.css            All styling (design tokens, components, RTL, reduced-motion)
+│       ├── lib/
+│       │   ├── api.js            fetch wrapper (bearer token), WS URL builder, raw-material URL, lang header
+│       │   ├── auth.jsx          Auth context (token in localStorage), useAuth()
+│       │   ├── hooks.js          useRoomSocket, useCycle (pomodoro), useVideoMesh (WebRTC), useAIStatus, useFocusSignal, useAttention
+│       │   ├── qr.js             QR boolean matrix + SVG path (qrcode-generator)
+│       │   ├── attention.js      Camera attention: pure tracker (createTracker/classify) + lazy on-device face-model loader
+│       │   └── i18n.jsx          t()/tx()/tr() + language context; loads locale dicts
+│       ├── locales/              fr.js, ar.js, darija.js (English-key → translation dictionaries)
+│       ├── components/           AIStatus.jsx, Common.jsx (TimerRing, Dots…), Materials.jsx, QrCode.jsx (inline-SVG QR), Tree.jsx (SVG tree), DrawBoard.jsx (pictionary canvas), Study.jsx (Explanation, HintLadder, SoloQuiz, ProgressPanel…)
+│       ├── pages/                Home, Study (solo tutor), Rooms (lobby), Room (study room), Live (lobby), Live→LiveRoom, Forest (study forest + QR invite), Review
+│       └── visuals/              Illustration renderers: Thales, FunctionPlot, ProcessFlow, ConceptMap + VisualSheet (dispatcher) + util.js
+│
+├── e2e/                          Playwright/Chromium browser tests (run against a live server on :8000)
+│   ├── run.py                    Main suite (home, solo study, illustrations, rooms, live)
+│   ├── game.py                   Break games incl. mime/pictionary turn + chat guessing
+│   ├── conversation.py           Study-room conversation + summary
+│   ├── camera.py                 WebRTC camera wall
+│   ├── images.py / rag.py        Material upload + grounded answers
+│   ├── lang.py                   Language switch + RTL
+│   ├── review.py                 Spaced-repetition flashcards
+│   ├── resume.py                 Revision-sheet button
+│   ├── forest.py                 Study forest + QR end-to-end: QR decode, two users, grow/wilt/plant, replant (~3–4 min)
+│   ├── draw.py                   Pictionary drawing board: performer draws, watcher sees it live, Clear empties both (~2 min)
+│   ├── attention.py              Opt-in camera attention check (fake camera + synthetic face); _synth_face.py builds the clip
+│   ├── _shot.py                  Screenshot helper
+│   └── shots/                    Saved screenshots (artifacts)
+│
+└── docs/handover/                THIS handover package (generated 2026-11-08)
+    ├── PROJECT_TECHNICAL_DOCUMENTATION.md
+    ├── PROJECT_HANDOVER_PROMPT.md
+    ├── DEVELOPMENT_ROADMAP.md
+    ├── env.example.txt
+    └── PROJECT_STRUCTURE.txt

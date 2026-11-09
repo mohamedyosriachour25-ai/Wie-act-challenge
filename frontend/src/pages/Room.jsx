@@ -73,6 +73,8 @@ function RoomView({ code }) {
   const [topicDraft, setTopicDraft] = useState("");
   const [share, setShare] = useState(true);
   const [qa, setQa] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [summary, setSummary] = useState({ text: "", at: 0 });
   const [matKey, setMatKey] = useState(0);
   const [question, setQuestion] = useState("");
   const [mins, setMins] = useState({ focus: 25, brk: 5 });
@@ -83,19 +85,21 @@ function RoomView({ code }) {
       case "snapshot":
         setRoom(m.room); setPresence(m.presence); setChat(m.chat); setTimer(m.timer); setTopic(m.topic); setTopicDraft(m.topic);
         setExplanation(m.explanation); setQuiz(m.quiz); setBusy(m.busy); setQa([...(m.qa || [])].reverse());
+        setHistory(m.history || []); setSummary(m.summary || { text: "", at: 0 });
         break;
       case "presence": setPresence(m.presence); break;
-      case "chat": setChat((c) => [...c.slice(-99), m.msg]); break;
+      case "chat": setChat((c) => [...c.slice(-99), m.msg]); setHistory((h) => [...h, { id: m.msg.id, kind: "chat", author: m.msg.anon ? "" : m.msg.author, text: m.msg.text, ts: m.msg.ts, anon: m.msg.anon }]); break;
       case "timer": setTimer(m.timer); break;
-      case "topic": setTopic(m.topic); setTopicDraft(m.topic); setExplanation(null); setQuiz(null); setPicks({}); setAiError(null); break;
-      case "explanation": setExplanation(m.data); setAiError(null); break;
+      case "topic": setTopic(m.topic); setTopicDraft(m.topic); setExplanation(null); setQuiz(null); setPicks({}); setAiError(null); setHistory((h) => [...h, { id: `top${Date.now()}`, kind: "topic", text: m.topic, ts: Date.now() / 1000 }]); break;
+      case "explanation": setExplanation(m.data); setAiError(null); setHistory((h) => [...h, { id: `exp${Date.now()}`, kind: "explanation", text: `${m.data.title}${m.data.summary ? " — " + m.data.summary : ""}`, ts: Date.now() / 1000 }]); break;
       case "busy": setBusy(m.what); if (m.what) setAiError(null); break;
       case "quiz": setQuiz(m.quiz); setPicks({}); break;
       case "quiz_progress": setQuiz((q) => (q ? { ...q, answered: m.answered } : q)); break;
       case "quiz_results": setQuiz((q) => (q ? { ...q, results: m.results } : q)); break;
-      case "answer": setQa((a) => [m.data, ...a].slice(0, 6)); setAiError(null); break;
+      case "answer": setQa((a) => [m.data, ...a].slice(0, 6)); setAiError(null); setHistory((h) => [...h, { id: `ans${Date.now()}`, kind: "answer", author: m.data.asker, text: `${m.data.question} → ${m.data.answer}`, ts: Date.now() / 1000 }]); break;
       case "materials_changed": setMatKey((n) => n + 1); break;
       case "ai_error": setAiError(m); break;
+      case "summary": setSummary(m.summary); break;
       case "nudge": setNudge(m.text); break;
       default:
     }
@@ -109,7 +113,7 @@ function RoomView({ code }) {
     const id = setInterval(() => send({ type: "focus", focused }), 20000);
     return () => clearInterval(id);
   }, [focused, send]);
-  useEffect(() => { log.current?.scrollTo({ top: log.current.scrollHeight }); }, [chat]);
+  useEffect(() => { log.current?.scrollTo({ top: log.current.scrollHeight }); }, [history, chat]);
 
   if (error) {
     return (
@@ -218,12 +222,25 @@ function RoomView({ code }) {
           </section>
 
           <section className="panel chat">
-            <h3>{t("Chat")}</h3>
+            <div className="row between">
+              <h3>{t("Conversation")}</h3>
+              <button className="btn small ghost" disabled={!!busy} onClick={() => send({ type: "summarize" })}>{busy === "summary" ? t("Summarising…") : t("Summarise")}</button>
+            </div>
+            {summary.text && (
+              <div className="session-summary">
+                <strong className="small">{t("Session summary")}</strong>
+                {summary.text.split("\n").filter(Boolean).map((line, i) => (<p key={i} className="small">{line.replace(/^-\s*/, "• ")}</p>))}
+              </div>
+            )}
             {nudge && <p className="banner info" role="status">{nudge} <button className="link" onClick={() => setNudge(null)}>{t("Dismiss")}</button></p>}
-            <ul className="log" ref={log} aria-live="polite">
-              {chat.length === 0 && <li className="muted small">{t("No messages yet.")}</li>}
-              {chat.map((m) => (
-                <li key={m.id} className={m.anon ? "anon" : ""}><strong>{m.anon ? t("Anonymous") : m.author}</strong> {m.text}</li>
+            <ul className="log convo" ref={log} aria-live="polite">
+              {history.length === 0 && <li className="muted small">{t("No messages yet.")}</li>}
+              {history.map((m) => (
+                m.kind === "chat"
+                  ? <li key={m.id} className={m.anon ? "anon" : ""}><strong>{m.anon ? t("Anonymous") : m.author}</strong> {m.text}</li>
+                  : <li key={m.id} className={`event ${m.kind}`}>
+                      <span className="tag">{m.kind === "explanation" ? t("Explanation") : m.kind === "answer" ? t("Answer") : t("Topic")}</span> {m.text}
+                    </li>
               ))}
             </ul>
             <form onSubmit={submitChat} className="compose">

@@ -31,6 +31,10 @@ jobs:
         working-directory: frontend
       - run: npm run i18n:check
         working-directory: frontend
+      - run: npm run attention:test
+        working-directory: frontend
+      - run: npm run qr:test
+        working-directory: frontend
       - run: npm run build
         working-directory: frontend
 

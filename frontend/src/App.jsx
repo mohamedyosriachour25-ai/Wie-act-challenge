@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes, Link } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, Link } from "react-router-dom";
 import { useAuth } from "./lib/auth.jsx";
 import { LangSwitch, useT } from "./lib/i18n.jsx";
 import AIStatus from "./components/AIStatus.jsx";
@@ -7,6 +7,8 @@ import Study from "./pages/Study.jsx";
 import Rooms from "./pages/Rooms.jsx";
 import Room from "./pages/Room.jsx";
 import { Live, LiveRoom } from "./pages/Live.jsx";
+import { ForestRoom } from "./pages/Forest.jsx";
+import Review from "./pages/Review.jsx";
 
 function Header() {
   const { user, logout } = useAuth();
@@ -26,6 +28,8 @@ function Header() {
         <NavLink to="/study">{t("Solo study")}</NavLink>
         <NavLink to="/rooms">{t("Study rooms")}</NavLink>
         <NavLink to="/live">{t("Live")}</NavLink>
+        <NavLink to="/forest">{t("Forest")}</NavLink>
+        <NavLink to="/review">{t("Revision")}</NavLink>
       </nav>
       <div className="top-right">
         <LangSwitch />
@@ -56,6 +60,9 @@ export default function App() {
           <Route path="/rooms/:code" element={<Room />} />
           <Route path="/live" element={<Live />} />
           <Route path="/live/:code" element={<LiveRoom />} />
+          <Route path="/forest" element={<Navigate to="/forest/LIVE-FOREST" replace />} />
+          <Route path="/forest/:code" element={<ForestRoom />} />
+          <Route path="/review" element={<Review />} />
           <Route path="*" element={<div className="narrow"><h1>{t("Page not found")}</h1><Link className="btn" to="/">{t("Go home")}</Link></div>} />
         </Routes>
       </main>
