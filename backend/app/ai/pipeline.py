@@ -1,17 +1,26 @@
-"""Study pipeline: who handles which step (this table is the documented orchestration choice).
+"""Study pipeline: who handles which step, per the project's orchestration guidance:
+  classification / triage / intent        -> compact
+  field extraction / formatting / rewrite -> compact
+  short summary of targeted text          -> compact
+  reasoning, synthesis, planning          -> mid
+  final user-facing writing               -> mid
+  fallback when mid-size is saturated     -> compact
 
   route       compact   classification: subject and level (runs in parallel with `illustrate`)
-  illustrate  mid       reasoning: which figure explains the topic, and its parameters (plan once)
-  explain     compact   writes the explanation around the finished figure (execute with the small model)
+  illustrate  mid       reasoning: which figure explains the topic, and its parameters
+  explain     mid       final user-facing writing: the explanation the learner reads
   repair      compact   fixes malformed JSON (only when needed)
   hint        compact   short targeted text
-  filter      compact   keeps the few passages that help a question about the course material
+  filter      compact   field extraction: keeps the few passages that help a material question
   answer      compact   short cited answer written from those passages
-  quiz        compact   drafts a question set (reviewed by a second compact pass); the mid model is reserved for figures
+  quiz        mid       reasoning/synthesis: plans and drafts the question set
+  quiz_check  compact   field extraction/correction: reviews the draft before the learner sees it
+  summary     compact   short summary of one session's targeted text
+  resume      mid       final user-facing writing: merges topics studied into one revision sheet
 
-Pattern: plan-once / execute-compact. The expensive model decides what to draw; the cheap model writes
-the words. Efficiency rules: one mid call per topic and language (cached, shared by every user and every
-room member), and the figure falls back to a deterministic concept map instead of a second model call.
+Efficiency rules unaffected by the mid/compact split: every mid call still goes through the gateway's
+cache (exact + semantic) and in-flight de-duplication, the figure plan is shared per topic and language
+across every user and room member, and a saturated mid model falls back to compact automatically.
 """
 from __future__ import annotations
 
@@ -118,7 +127,7 @@ async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str |
     figure_text, focus_keys = describe_figure(visual)
 
     exp, m_exp = await gw.chat_json(
-        "explain", "compact", prompts.explain_messages(topic, style, level, figure_text, lang, context), _validate_explanation, max_tokens=800, schema=prompts.EXPLAIN_SCHEMA
+        "explain", "mid", prompts.explain_messages(topic, style, level, figure_text, lang, context), _validate_explanation, max_tokens=800, schema=prompts.EXPLAIN_SCHEMA
     )
     if exp is None:
         raise AIError("format", "The model's answer could not be read. Rephrase the topic and try again.")
@@ -153,7 +162,7 @@ async def get_quiz(gw: Gateway, topic: str, level: str = "beginner", lang: str =
     lang = prompts.norm_lang(lang)
     # Draft with the mid-size model (synthesis), then revise with the compact model (checking): the
     # reviewer fixes wrong answer keys and weak distractors. It can only keep or improve the quiz.
-    draft, m_draft = await gw.chat_json("quiz", "compact", prompts.quiz_messages(topic, level, lang), _validate_quiz, max_tokens=800, schema=prompts.QUIZ_SCHEMA)
+    draft, m_draft = await gw.chat_json("quiz", "mid", prompts.quiz_messages(topic, level, lang), _validate_quiz, max_tokens=800, schema=prompts.QUIZ_SCHEMA)
     if draft is None:
         raise AIError("format", "The quiz could not be generated. Try again.")
     metas = [m_draft]
@@ -173,11 +182,11 @@ async def summarise_session(gw: Gateway, topic: str, transcript: str, lang: str 
 
 
 async def revision_sheet(gw: Gateway, topics: list[str], lang: str = "en") -> dict:
-    """Compact revision sheet across the topics a learner has studied (student-triggered)."""
+    """Mid-size revision sheet across the topics a learner has studied (final user-facing writing, student-triggered)."""
     topics = [t for t in topics if t][:12]
     if not topics:
         raise ValueError("Study a few topics first, then generate a revision sheet.")
-    text, meta = await gw.chat("resume", "compact", prompts.resume_messages(topics, prompts.norm_lang(lang)), max_tokens=700)
+    text, meta = await gw.chat("resume", "mid", prompts.resume_messages(topics, prompts.norm_lang(lang)), max_tokens=700)
     return {"sheet": text.strip(), "topics": topics, "meta": _summarise([meta])}
 
 

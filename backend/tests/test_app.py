@@ -124,7 +124,7 @@ def test_group_room_shares_one_explanation_and_a_quiz(client):
         results = recv_until(b, "quiz_results")["results"]
         assert results["questions"][0]["picks"][:3] == [1, 0, 1]
         assert results["scores"][0] == {"pseudo": "alice", "correct": 1, "total": 4}
-    assert client.get("/api/ai/metrics").json()["calls"]["mid"] == 1  # only the explanation uses the mid model (figure); the quiz is compact now
+    assert client.get("/api/ai/metrics").json()["calls"]["mid"] == 3  # figure + explanation text + quiz draft all use mid
 
 
 def test_live_room_follows_a_fixed_schedule_and_counts_focus(client):
@@ -153,4 +153,4 @@ def test_simulation_endpoint_drives_the_resilience_demo(client):
     r = client.post("/api/study/explain", json={"topic": "Photosynthesis"}, headers=h).json()
     assert r["meta"]["degraded"] is True
     m = client.get("/api/ai/metrics").json()
-    assert m["fallbacks"] == 1
+    assert m["fallbacks"] == 2  # both mid calls (figure + explanation text) fall back to compact

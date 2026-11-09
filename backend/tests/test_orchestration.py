@@ -1,4 +1,5 @@
-"""Which model class does what: the figure is designed by mid-size, words and answers by compact."""
+"""Which model class does what: reasoning/synthesis/final writing (figure, explanation, quiz, resume) is
+mid-size; classification, extraction, short summaries, hints and material answers are compact."""
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,12 +24,12 @@ def calls(client):
     return client.get("/api/ai/metrics").json()["calls"]
 
 
-def test_explanation_costs_one_mid_call_for_the_figure_and_two_compact_calls(client):
+def test_explanation_costs_two_mid_calls_and_one_compact_call(client):
     h = signup(client)
     out = client.post("/api/study/explain", json={"topic": "Thales theorem"}, headers=h).json()
     c = calls(client)
-    assert (c["mid"], c["compact"]) == (1, 2)
-    assert [(m["task"], m["cls"]) for m in out["meta"]["calls"]] == [("route", "compact"), ("illustrate", "mid"), ("explain", "compact")]
+    assert (c["mid"], c["compact"]) == (2, 1)
+    assert [(m["task"], m["cls"]) for m in out["meta"]["calls"]] == [("route", "compact"), ("illustrate", "mid"), ("explain", "mid")]
     assert out["figure_note"] and out["visual"]["template"] == "thales" and not out["visual_fallback"]
 
 

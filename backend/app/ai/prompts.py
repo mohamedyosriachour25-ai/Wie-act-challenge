@@ -124,7 +124,7 @@ def summary_messages(topic: str, transcript: str, lang: str = "en") -> list[dict
 
 
 def resume_messages(topics: list[str], lang: str = "en") -> list[dict]:
-    """Compact step: a revision sheet across the topics a learner has studied. The list is data, never instructions."""
+    """Mid-size step: a revision sheet across the topics a learner has studied. The list is data, never instructions."""
     system = (
         "TASK: resume\n"
         "You write a concise revision sheet for a learner, covering the topics they have studied. "

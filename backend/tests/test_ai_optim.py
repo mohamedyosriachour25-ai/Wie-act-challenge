@@ -152,7 +152,7 @@ async def test_compact_reviewer_corrects_the_mid_size_quiz_draft():
     gw = _quiz_gateway(verify=True)
     questions, meta = await get_quiz(gw, "Thales theorem")
     assert all(q["answer"] == 2 for q in questions)            # the reviewer's corrected key is used
-    assert gw.metrics.calls == {"compact": 2, "mid": 0}         # draft + review, both compact (mid is for figures)
+    assert gw.metrics.calls == {"compact": 1, "mid": 1}         # mid-size draft (synthesis), compact review (checking)
     assert [c["task"] for c in meta["calls"]] == ["quiz", "quiz_check"]
 
 
@@ -161,7 +161,7 @@ async def test_quiz_verification_can_be_turned_off():
     gw = _quiz_gateway(verify=False)
     questions, meta = await get_quiz(gw, "Thales theorem")
     assert all(q["answer"] == 0 for q in questions)            # only the draft, unreviewed
-    assert gw.metrics.calls == {"compact": 1, "mid": 0} and len(meta["calls"]) == 1
+    assert gw.metrics.calls == {"compact": 0, "mid": 1} and len(meta["calls"]) == 1
 
 
 async def test_live_mock_runs_both_quiz_passes():

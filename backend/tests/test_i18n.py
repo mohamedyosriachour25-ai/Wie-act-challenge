@@ -120,4 +120,3 @@ def test_room_members_get_errors_and_nudges_in_their_own_language(client):
 def test_status_carries_a_code_the_interface_can_translate(client):
     s = client.get("/api/ai/status").json()
     assert "code" in s and "cls" in s
-
