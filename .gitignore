@@ -5,5 +5,4 @@ __pycache__/
 *.db
 .env
 .pytest_cache/
-e2e/shots/*.png
 test-users*.csv

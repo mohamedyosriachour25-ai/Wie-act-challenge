@@ -15,7 +15,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-PSEUDO_RE = re.compile(r"^[A-Za-z0-9_\-]{3,20}$")
+# \w is Unicode-aware for str patterns, so this accepts letters from any script
+# (Arabic, Darija, accented French) plus digits, underscore and hyphen.
+PSEUDO_RE = re.compile(r"^[\w\-]{3,20}$")
 TOKEN_TTL = 7 * 24 * 3600
 
 

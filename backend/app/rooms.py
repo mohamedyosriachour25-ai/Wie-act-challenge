@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -22,13 +23,14 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from . import games, materials, scoring, security
-from .ai import pipeline
+from . import competition, games, materials, scoring, security
+from .ai import pipeline, tutor
 from .ai.gateway import AIError
 from .auth import current_user, user_from_token
 from .i18n import lang_of, norm, tr
 
 router = APIRouter(tags=["rooms"])
+log = logging.getLogger("herwiego")
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 REACTIONS = ("👏", "🔥", "💡", "☕")
 GAME_SLOT_S = 25          # seconds per trivia question (matches the client's break trivia slot)
@@ -105,6 +107,12 @@ class Room:
         self.results: dict | None = None
         self.busy: str | None = None
         self.qa_log: list[dict] = []   # shared answers from the room's material
+        self.live_explain: list[dict] | None = None   # events of the explanation being generated (replayed to late joiners)
+        self.live_ask: dict | None = None             # {asker, question, events} of the question being answered
+        self.owner_id = row["owner_id"] if "owner_id" in row.keys() else None
+        self.comp: "competition.Competition | None" = None       # the competition being played
+        self.comp_last: "competition.Competition | None" = None  # the last one, for late joiners' podium
+        self.comp_seq = 0
         self.events: dict[int, dict] = {}        # live group games, keyed by pomodoro cycle index
         self.game_tasks: dict[str, asyncio.Task] = {}  # one turn-game driver per chosen game in the current break
         self.game_content: dict[int, asyncio.Task] = {}  # per cycle: words + trivia for that break (AI or built-in bank)
@@ -115,6 +123,31 @@ class Room:
         self.forest: list[dict] = []             # trees that finished (planted or wilted), newest last
         self._tree_events: list[dict] = []       # finished trees not yet announced to the room
         self._forest_task: asyncio.Task | None = None
+        self._restore(row["state"] if "state" in row.keys() else "")
+
+    # ------------------------------------------------------------ saved work
+    def _restore(self, raw: str) -> None:
+        """A study room's generated work comes back after a restart or when the room is reopened."""
+        if not raw or self.kind != "group":
+            return
+        try:
+            st = json.loads(raw)
+        except ValueError:
+            return
+        if st.get("topic") == self.topic:   # an explanation/quiz only belongs to the topic it was made for
+            self.explanation = st.get("explanation")
+            self.quiz = st.get("quiz")
+            self.results = st.get("results")
+        self.qa_log = (st.get("qa") or [])[-20:]
+
+    def save(self, app) -> None:
+        if self.kind != "group":
+            return
+        st = {"topic": self.topic, "explanation": self.explanation, "quiz": self.quiz, "results": self.results, "qa": self.qa_log[-20:]}
+        try:
+            app.state.db.execute("UPDATE rooms SET state=? WHERE code=?", (json.dumps(st, ensure_ascii=False), self.code))
+        except Exception:
+            log.exception("saving room state failed room=%s", self.code)
 
     # ------------------------------------------------------------ study forest
     def tree_rules(self) -> tuple[float, float]:
@@ -229,6 +262,9 @@ class Room:
             "quiz": self.quiz_public(),
             "busy": self.busy,
             "qa": self.qa_log[-5:],
+            "live_explain": self.live_explain,
+            "live_ask": self.live_ask,
+            "competition": (self.comp or self.comp_last).public() if (self.comp or self.comp_last) else None,
             "server_now": time.time(),
         }
 
@@ -249,9 +285,9 @@ class Hub:
 
 
 def bank_game_points(member: "Member", user_id: int, game_points: int, game: str) -> None:
-    """Break-game points also count toward the account score: 1 score point per 10 game points (daily cap)."""
+    """Break-game points also count toward the account score: 1 score point per 20 game points (daily cap 30)."""
     try:
-        scoring.award(member.ws.app.state.db, user_id, "game", units=game_points // 10, ref=game)
+        scoring.award(member.ws.app.state.db, user_id, "game", units=game_points // 20, ref=game)
     except Exception:    # scoring must never break a game
         pass
 
@@ -1090,6 +1126,8 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
             room.topic, room.explanation, room.quiz, room.results, room.answers = topic, None, None, None, {}
             log_message(app, room.code, "topic", "", topic)
             app.state.db.execute("UPDATE rooms SET topic=? WHERE code=?", (topic, room.code))  # saved rooms keep their topic
+            room.live_explain = None
+            room.save(app)
             await broadcast(room, {"type": "topic", "topic": topic})
 
     elif kind == "timer_start":
@@ -1104,7 +1142,7 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
         room.timer = None
         await broadcast(room, {"type": "timer", "timer": None, "server_now": now})
 
-    elif kind in ("explain", "ask", "quiz_start", "summarize") and room.busy is None and (wait := security.ai_budget(app, member.user_id)):
+    elif kind in ("explain", "ask", "quiz_start", "summarize", "comp_start") and room.busy is None and (wait := security.ai_budget(app, member.user_id)):
         await send(member, {"type": "ai_error", "kind": "rate", "message": security.rate_limit_message(member.lang, wait), "retry_after": int(wait) + 1})
 
     elif kind == "explain":
@@ -1114,18 +1152,20 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
             await broadcast(room, {"type": "busy", "what": "explain"})
 
     elif kind == "ask":
-        question = _clean(data.get("question"), 300)
+        question = _clean(data.get("question"), 500)
         if len(question) < 3:
             return
         if not materials.collection_has_material(app.state.db, f"r:{room.code}"):
             await send(member, {"type": "ai_error", "kind": "input", "message": tr(member.lang, "This room has no material yet. Add a document first and wait until it is ready."), "retry_after": None})
+        elif (reason := materials.personal_data_reason(question)):
+            await send(member, {"type": "ai_error", "kind": "input", "message": f"{tr(member.lang, reason)} {tr(member.lang, 'Messages are sent to the AI service, so remove personal details and send it again.')}", "retry_after": None})
         elif room.busy is None:
             room.busy = "ask"
             asyncio.create_task(run_ask(app, room, question, member.pseudo, member.lang))
             await broadcast(room, {"type": "busy", "what": "ask"})
 
     elif kind == "quiz_start":
-        if room.topic and room.busy is None:
+        if room.topic and room.busy is None and room.comp is None:
             room.busy = "quiz"
             asyncio.create_task(run_quiz(app, room, member.lang))
             await broadcast(room, {"type": "busy", "what": "quiz"})
@@ -1139,6 +1179,33 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
 
     elif kind == "quiz_reveal" and room.quiz is not None and room.results is None:
         await reveal(app, room)
+
+    elif kind == "comp_start":
+        if room.topic and room.busy is None and room.comp is None and room.quiz is None:
+            room.comp_seq += 1
+            comp = competition.Competition(room.comp_seq, room.topic, member.pseudo)
+            room.comp, room.busy = comp, "competition"
+            level = ((room.explanation or {}).get("intent") or {}).get("level", "beginner")
+            await broadcast(room, {"type": "comp_preparing", "competition": comp.public()})
+            await broadcast(room, {"type": "busy", "what": "competition"})
+            asyncio.create_task(competition.run(app, room, comp, level, member.lang))
+
+    elif kind == "comp_answer" and room.comp is not None:
+        comp, i = room.comp, data.get("i")
+        if isinstance(i, int) and comp.submit(member.user_id, member.pseudo, data.get("value"), i):
+            answered = len(comp.answers.get(i, {}))
+            await send(member, {"type": "comp_ack", "i": i})
+            await broadcast(room, {"type": "comp_progress", "i": i, "answered": answered, "players": len(room.members)})
+            if answered >= len(room.members):
+                comp.answered.set()        # everyone answered: reveal now, no waiting for the clock
+
+    elif kind == "comp_stop" and room.comp is not None:
+        if member.pseudo == room.comp.by or member.user_id == room.owner_id:
+            room.comp_last, room.comp = None, None
+            if room.busy == "competition":
+                room.busy = None
+                await broadcast(room, {"type": "busy", "what": None})
+            await broadcast(room, {"type": "comp_cancelled", "by": member.pseudo})
 
     elif kind == "summarize" and room.busy is None:
         room.busy = "summary"
@@ -1157,46 +1224,97 @@ async def nudge_quiet_members(room: Room, now: float) -> None:
 
 
 async def run_ask(app, room: Room, question: str, asker: str, lang: str = "en") -> None:
+    """A member's question to the room's material, answered with the staged tutor (no figure) and shared:
+    everyone sees the stages, the quick draft and the final answer, with citations. The last two room
+    Q&As are the conversation, so a follow-up ("and the second one?") is understood."""
+    s = app.state.settings
+    collection = f"r:{room.code}"
+    recent: list[dict] = []
+    for q in room.qa_log[-2:]:
+        recent += [{"role": "user", "content": q.get("question", "")}, {"role": "assistant", "content": q.get("text") or q.get("answer", "")}]
+
+    async def retrieve(query: str) -> list[dict]:
+        return await materials.retrieve(app, collection, query, k=6)
+
+    room.live_ask = {"asker": asker, "question": question, "events": []}
     try:
-        cands = await materials.retrieve(app, f"r:{room.code}", question)
-        result = await pipeline.ask_material(app.state.gateway, question, cands, app.state.settings.min_similarity, lang)
-        entry = {**result, "asker": asker}
-        room.qa_log.append(entry)
-        del room.qa_log[:-20]
-        log_message(app, room.code, "answer", asker, f"{question} → {result['answer'][:400]}")
-        await broadcast(room, {"type": "answer", "data": entry})
+        async for ev in tutor.run_turn(
+            gw=app.state.gateway, message=question, summary=room.summary or "", recent=recent, style="balanced", lang=lang,
+            retrieve=retrieve, min_similarity=s.min_similarity, web=None, use_web=False, quick_draft=s.quick_draft,
+            library=materials.library_overview(app.state.db, collection), figures=False,
+        ):
+            if ev["type"] == "done":
+                r = ev["result"]
+                entry = {"question": question, "asker": asker, "text": r["text"], "sources": r["sources"], "used": r["used"],
+                         "grounded": any(x["kind"] == "material" for x in r["sources"]), "meta": r["meta"]}
+                room.qa_log.append(entry)
+                del room.qa_log[:-20]
+                room.live_ask = None
+                room.save(app)
+                log_message(app, room.code, "answer", asker, f"{question} → {r['text'][:400]}")
+                await broadcast(room, {"type": "answer", "data": entry})
+            else:
+                if room.live_ask is not None:
+                    room.live_ask["events"].append(ev)
+                await broadcast(room, {"type": "tutor_ask", "event": ev, "asker": asker, "question": question})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
     finally:
+        room.live_ask = None
         room.busy = None
         await broadcast(room, {"type": "busy", "what": None})
 
 
 async def run_explain(app, room: Room, lang: str = "en") -> None:
+    """The room's shared explanation, as staged partial results every member sees at the same time
+    (`tutor` events): sources -> compact quick draft -> mid-size final answer -> figure (in parallel).
+    The topic is explicit, so no intent call; neutral style so it is the same for everyone and cached."""
+    s = app.state.settings
+    collection = f"r:{room.code}"
+
+    async def retrieve(query: str) -> list[dict]:
+        if not materials.collection_has_material(app.state.db, collection):
+            return []
+        return await materials.retrieve(app, collection, query, k=6)
+
+    room.live_explain = []
     try:
-        # Neutral style so the explanation is the same for everyone and shared through the cache.
-        # When the room has course material, the explanation is grounded in the most relevant passages.
-        context = None
-        collection = f"r:{room.code}"
-        if materials.collection_has_material(app.state.db, collection):
-            found = await materials.retrieve(app, collection, room.topic, k=4)
-            context = [c for c in found if c["score"] >= app.state.settings.min_similarity] or None
-        result = await pipeline.explain(app.state.gateway, room.topic, "balanced", context=context, lang=lang)
-        room.explanation = result
-        log_message(app, room.code, "explanation", "", f"{result['title']} — {result.get('summary', '')}")
-        await broadcast(room, {"type": "explanation", "data": result})
+        topic = room.topic
+        async for ev in tutor.run_turn(
+            gw=app.state.gateway, message=topic, summary=room.summary or "", recent=[], style="balanced", lang=lang,
+            retrieve=retrieve, min_similarity=s.min_similarity, web=app.state.web if s.web_search else None,
+            use_web=True, quick_draft=s.quick_draft, personal_data=materials.personal_data_reason,
+            known_intent={"intent": "explain", "standalone": f"Explain {topic}", "topic": topic, "figure": True},
+            library=materials.library_overview(app.state.db, collection),
+        ):
+            if room.topic != topic:          # the topic changed meanwhile: drop this explanation
+                return
+            if ev["type"] == "done":
+                r = ev["result"]
+                room.explanation = {k: r[k] for k in ("text", "sources", "used", "visual", "visual_fallback", "figure_note", "intent", "meta", "step_focus")}
+                room.live_explain = None
+                room.save(app)
+                title = next((ln.lstrip("#").strip() for ln in r["text"].splitlines() if ln.strip()), topic)
+                log_message(app, room.code, "explanation", "", title[:200])
+                await broadcast(room, {"type": "explanation", "data": room.explanation})
+            else:
+                if room.live_explain is not None:
+                    room.live_explain.append(ev)
+                await broadcast(room, {"type": "tutor", "event": ev})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
     finally:
+        room.live_explain = None
         room.busy = None
         await broadcast(room, {"type": "busy", "what": None})
 
 
 async def run_quiz(app, room: Room, lang: str = "en") -> None:
     try:
-        level = room.explanation["level"] if room.explanation else "beginner"
+        level = ((room.explanation or {}).get("intent") or {}).get("level", "beginner")
         questions, _ = await pipeline.get_quiz(app.state.gateway, room.topic, level, lang)
         room.quiz, room.answers, room.results = questions, {}, None
+        room.save(app)
         await broadcast(room, {"type": "quiz", "quiz": room.quiz_public()})
     except (AIError, ValueError) as exc:
         await broadcast_ai_error(room, exc)
@@ -1243,4 +1361,5 @@ async def reveal(app, room: Room) -> None:
         scoring.track(app.state.db, user_id, "group_quiz", {"room": room.code, "correct": correct, "total": len(room.quiz)})
         scoring.award(app.state.db, user_id, "group_quiz", units=correct, ref=room.code)
     room.results = {"questions": per_q, "scores": sorted(scores, key=lambda s: -s["correct"])}
+    room.save(app)
     await broadcast(room, {"type": "quiz_results", "results": room.results})

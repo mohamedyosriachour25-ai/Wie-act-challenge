@@ -39,6 +39,11 @@ _T: dict[str, tuple[str, str, str]] = {
     "Join the room first to use its material.": (
         "Rejoignez d'abord la salle pour utiliser son matériel.", "انضم إلى الغرفة أولًا لاستخدام موادها.", "ادخل للغرفة الأول باش تستعمل الدروس متاعها."),
     "That file is too large. The limit is 3 MB.": ("Ce fichier est trop volumineux. La limite est de 3 Mo.", "الملف كبير جدًا. الحد الأقصى 3 ميغابايت.", "الملف كبير برشا. الحد الأقصى 3 ميغا."),
+    "The tutor is still answering your previous message in this space.": ("Le tuteur répond encore à votre message précédent dans cet espace.", "لا يزال المعلّم يجيب عن رسالتك السابقة في هذه المساحة.", "المعلّم مازال يجاوب على الميساج اللي قبلو في الفضاء هذا."),
+    "Stopped.": ("Arrêté.", "تم الإيقاف.", "وقفناه."),
+    "No OCR model is configured.": ("Aucun modèle OCR n'est configuré.", "لم يتم إعداد نموذج للتعرّف الضوئي على النصوص.", "ما فماش موديل OCR مركّب."),
+    "That file is too large. The limit is {n} MB.": ("Ce fichier est trop volumineux. La limite est de {n} Mo.", "الملف كبير جدًا. الحد الأقصى {n} ميغابايت.", "الملف كبير برشا. الحد الأقصى {n} ميغا."),
+    "This PDF is password-protected. Remove the password, or paste the text.": ("Ce PDF est protégé par un mot de passe. Retirez-le, ou collez le texte.", "ملف PDF هذا محمي بكلمة مرور. أزل كلمة المرور أو الصق النص.", "الـPDF هذا محمي بكلمة سر. نحّي كلمة السر ولا ألصق النص."),
     "That is too short to be useful. Add at least a few sentences.": (
         "C'est trop court pour être utile. Ajoutez au moins quelques phrases.", "النص قصير جدًا ليكون مفيدًا. أضف بضع جمل على الأقل.", "قصير برشا وما يفيدش. زيد كان جمل قلال على الأقل."),
     "This looks like it contains e-mail addresses.": ("Ce texte semble contenir des adresses e-mail.", "يبدو أن النص يحتوي على عناوين بريد إلكتروني.", "يبان فيه عناوين إيميل."),
@@ -133,6 +138,22 @@ _T: dict[str, tuple[str, str, str]] = {
     "That card does not exist.": ("Cette carte n'existe pas.", "هذه البطاقة غير موجودة.", "البطاقة هذي ما موجودةش."),
     "This pocket-tree link is invalid or has expired.": (
         "Ce lien d'arbre de poche est invalide ou a expiré.", "رابط الشجرة المحمولة غير صالح أو انتهت صلاحيته.", "الرابط متاع الشجرة ما يخدمش أو خلص وقتو."),
+    "My study space": ("Mon espace d'étude", "مساحة الدراسة الخاصة بي", "فضاء القراية متاعي"),
+    "This study space does not exist.": ("Cet espace d'étude n'existe pas.", "مساحة الدراسة هذه غير موجودة.", "فضاء القراية هذا موش موجود."),
+    "Give the space a name.": ("Donnez un nom à l'espace.", "أعطِ المساحة اسمًا.", "عطي اسم للفضاء."),
+    "You can keep {n} study spaces. Delete one first.": (
+        "Vous pouvez garder {n} espaces d'étude. Supprimez-en un d'abord.", "يمكنك الاحتفاظ بـ{n} مساحات دراسة. احذف واحدة أولًا.", "تنجم تخلّي {n} فضاءات قراية. فسّخ واحد الأول."),
+    "Your first space holds your personal library and cannot be deleted. Clear its conversation instead.": (
+        "Votre premier espace contient votre bibliothèque personnelle et ne peut pas être supprimé. Effacez plutôt sa conversation.",
+        "مساحتك الأولى تحتوي على مكتبتك الشخصية ولا يمكن حذفها. امسح محادثتها بدلًا من ذلك.",
+        "الفضاء الأول فيه المكتبة متاعك وما يتفسخش. فسّخ المحادثة متاعو خير."),
+    "Messages are sent to the AI service, so remove personal details and send it again.": (
+        "Les messages sont envoyés au service d'IA : retirez les données personnelles et renvoyez-le.",
+        "تُرسَل الرسائل إلى خدمة الذكاء الاصطناعي، لذا احذف البيانات الشخصية وأعد الإرسال.",
+        "الميساجات تتبعث لخدمة الذكاء الاصطناعي، نحّي المعلومات الشخصية وابعثو من جديد."),
+    "Type a question of at least two characters.": ("Écrivez une question d'au moins deux caractères.", "اكتب سؤالًا من حرفين على الأقل.", "اكتب سؤال فيه زوز حروف على الأقل."),
+    "The model returned an empty answer. Try rephrasing.": ("Le modèle a renvoyé une réponse vide. Reformulez la question.", "أعاد النموذج إجابة فارغة. أعد صياغة السؤال.", "الموديل رجّع جواب فارغ. عاود اكتب السؤال بطريقة أخرى."),
+    "The competition questions could not be generated. Try again.": ("Les questions de la compétition n'ont pas pu être générées. Réessayez.", "تعذّر إنشاء أسئلة المسابقة. حاول مرة أخرى.", "ما نجّمناش نحضّرو أسئلة المسابقة. عاود جرّب."),
 }
 
 CATALOG: dict[str, dict[str, str]] = {

@@ -1,0 +1,15 @@
+{
+  "name": "HerwieGO",
+  "short_name": "HerwieGO",
+  "description": "GenAI peer-learning companion: study spaces, live focus rooms, group study and competitions.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1E1738",
+  "theme_color": "#29145E",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

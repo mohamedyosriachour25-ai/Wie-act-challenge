@@ -51,6 +51,59 @@ export async function api(path, { method = "GET", body } = {}) {
   return data;
 }
 
+/**
+ * POST that answers as Server-Sent Events (`data: {json}` blocks): calls onEvent for each event as it
+ * arrives. Used by study-space turns, where each finished stage (intent, sources, draft, final answer,
+ * figure) is pushed the moment it is ready. Abort with `signal`.
+ */
+export function streamPost(path, body, onEvent, signal) {
+  return streamRequest("POST", path, body, onEvent, signal);
+}
+
+/** Server-Sent Events over fetch (POST to start a turn, GET to reconnect to one). Resolves false on 204 (nothing running). */
+export async function streamRequest(method, path, body, onEvent, signal) {
+  const headers = { "X-Lang": currentLang, Accept: "text/event-stream" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let res;
+  try {
+    res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    throw new ApiError("Cannot reach the HerwieGO server. Check that the backend is running.", 0);
+  }
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch { /* empty body */ }
+    throw new ApiError(typeof data?.detail === "string" ? data.detail : "Something went wrong. Try again.", res.status, data?.retry_after, data?.kind);
+  }
+  if (res.status === 204) return false;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const flush = (block) => {
+    for (const line of block.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      let event = null;
+      try { event = JSON.parse(line.slice(6)); } catch { /* a malformed line is skipped */ }
+      if (event) onEvent(event);
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n\n")) >= 0) {
+      flush(buffer.slice(0, cut));
+      buffer = buffer.slice(cut + 2);
+    }
+  }
+  if (buffer.trim()) flush(buffer);
+  return true;
+}
+
 export const wsUrl = (code) => {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws/rooms/${encodeURIComponent(code)}?token=${encodeURIComponent(getToken())}&lang=${currentLang}`;

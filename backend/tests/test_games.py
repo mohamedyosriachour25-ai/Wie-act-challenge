@@ -90,7 +90,7 @@ def test_a_correct_guess_is_hidden_scored_and_ends_the_turn_when_everyone_has_it
     a.__exit__(None, None, None); b.__exit__(None, None, None)
     game_pts = {r["pseudo"]: r["s"] for r in client.app.state.db.all(
         "SELECT u.pseudo, SUM(p.points) AS s FROM points p JOIN users u ON u.id=p.user_id WHERE p.rule='game' GROUP BY u.pseudo")}
-    assert game_pts["bob"] >= 10 and game_pts["alice"] == 4             # the game points count toward the account score
+    assert game_pts["bob"] >= 5 and game_pts["alice"] == 2              # game points count toward the account score (v2: 1 per 20)
 
 
 def test_a_close_guess_is_blurred_for_others_and_flagged_to_the_guesser(client, fast):

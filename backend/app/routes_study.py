@@ -284,4 +284,6 @@ def ai_status(request: Request):
 @router.get("/ai/metrics")
 def ai_metrics(request: Request):
     gw = request.app.state.gateway
-    return {**gw.metrics.to_dict(), "cache_entries": len(gw.cache), "models": {"compact": gw.s.compact_model, "mid": gw.s.mid_model}}
+    store = request.app.state.vectors
+    return {**gw.metrics.to_dict(), "cache_entries": len(gw.cache), "models": {"compact": gw.s.compact_model, "mid": gw.s.mid_model},
+            "vector_index": store.info() if store is not None else {"backend": "local"}}

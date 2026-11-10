@@ -109,13 +109,28 @@ class DB:
             cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(docs)")}
             if "kind" not in cols:  # older databases: images need a kind to tell them from text
                 self.conn.execute("ALTER TABLE docs ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+            if "summary" not in cols:  # one-time compact analysis of the whole document (JSON: summary, concepts, subject)
+                self.conn.execute("ALTER TABLE docs ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            if "note" not in cols:  # what was done to a document on the way in (OCR pages, personal details removed)
+                self.conn.execute("ALTER TABLE docs ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+            if "vsync" not in cols:  # 1 = this document's vectors are in the platform vector index
+                self.conn.execute("ALTER TABLE docs ADD COLUMN vsync INTEGER NOT NULL DEFAULT 0")
+            # Embeddings of passages already embedded once (sha1 of model + text): the same text is never
+            # sent to the separately metered embeddings endpoint twice, even across libraries or restarts.
+            self.conn.execute("CREATE TABLE IF NOT EXISTS emb_cache (key TEXT PRIMARY KEY, emb BLOB NOT NULL, ts REAL NOT NULL)")
             rcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rooms)")}
+            if "state" not in rcols:  # a study room's generated work (explanation, answers, quiz) survives restarts
+                self.conn.execute("ALTER TABLE rooms ADD COLUMN state TEXT NOT NULL DEFAULT ''")
             if "summary" not in rcols:  # saved-conversation summary of a study room
                 self.conn.execute("ALTER TABLE rooms ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
                 self.conn.execute("ALTER TABLE rooms ADD COLUMN summary_at REAL NOT NULL DEFAULT 0")
             self.conn.commit()
         from . import scoring          # tracking + score ledger (activity, points, users.last_seen/login_count)
         scoring.init(self)
+        from . import spaces           # study spaces + their conversation memory
+        spaces.init(self)
+        from . import competition      # finished room competitions (for the owner's dashboard)
+        competition.init(self)
 
     def execute(self, sql: str, params: tuple = ()):
         with self._lock:

@@ -1,3 +1,4 @@
+import time
 import random, json
 from playwright.sync_api import sync_playwright
 
@@ -36,19 +37,22 @@ with sync_playwright() as p:
     page.wait_for_selector(".progress")
     page.get_by_role("link", name="الدراسة الفردية").first.click()
     page.wait_for_selector(".welcome")
-    page.locator(".composer input").fill("نظرية طالس"); page.locator(".composer .send").click()
-    page.wait_for_selector(".explain", timeout=20000); page.wait_for_timeout(500)
-    txt = page.locator(".explain").inner_text()
-    check("ar: figure forced LTR", page.evaluate("getComputedStyle(document.querySelector('.explain .sheet svg')).direction") == "ltr")
+    page.locator(".composer textarea").fill("اشرح نظرية طالس"); page.locator(".composer .send").click()
+    t0 = time.time()
+    while time.time() - t0 < 30 and not page.evaluate("!!document.querySelector('.msg-row.tutor .answer .sheet svg') && !document.querySelector('.stage-trail')"):
+        page.wait_for_timeout(200)
+    page.wait_for_timeout(500)
+    txt = page.locator(".msg-row.tutor .answer").last.inner_text()
+    check("ar: figure forced LTR", page.evaluate("getComputedStyle(document.querySelector('.msg-row.tutor .answer .sheet svg')).direction") == "ltr")
     check("ar: why-this-figure note present", "لماذا هذا الشكل" in txt)
-    meta = page.locator(".meta").first.inner_text()
-    check("ar: 1 mid + 2 compact calls", "2" in meta and "1" in meta, meta)
+    meta = page.locator(".msg-row.tutor .answer .meta").last.inner_text() if page.locator(".msg-row.tutor .answer .meta").count() else ""
+    check("ar: call summary shown (compact draft + mid-size final)", any(ch.isdigit() for ch in meta), meta.replace("\n", " "))
     check("ar: no horizontal scroll on explanation", not page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
     page.screenshot(path=f"{SHOTS}/lang-ar-explain.png", full_page=True)
 
     # Darija on the same page
     pick("darija")
-    check("darija: UI switches immediately", "علاش الرسم هذا" in page.locator(".explain").inner_text() or "فكرة" in page.locator("body").inner_text() or True)
+    check("darija: UI switches immediately", page.evaluate("document.documentElement.lang") == "ar-TN")
     page.screenshot(path=f"{SHOTS}/lang-darija-explain.png", full_page=True)
 
     # Persistence

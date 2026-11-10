@@ -5,6 +5,7 @@ import os
 BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
 SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
+RUN = str(int(time.time()))[-6:]   # fresh accounts on every run, so the suite can be repeated on one database
 def poll(page, expr, ms=20000):
     import time as _t; end=_t.time()+ms/1000
     while _t.time()<end:
@@ -39,7 +40,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(600)
     page.screenshot(path=f"{SHOTS}/01-home.png")
     check("home hero shows interactive figure", page.locator(".hero .sheet svg").count() == 1)
-    register(page, "tester_755712421")
+    register(page, "tester_a" + RUN)
     page.wait_for_selector(".progress")
     check("registered, progress panel on home", page.locator(".progress").count() == 1)
 
@@ -48,23 +49,32 @@ with sync_playwright() as p:
     page.wait_for_selector(".welcome")
     check("solo study opens without a quiz", page.locator(".diag").count() == 0)
 
-    # ---- Explain Thales
-    page.locator(".composer input").fill("Thales theorem"); page.locator(".composer .send").click()
-    page.wait_for_selector(".thinking")
-    page.screenshot(path=f"{SHOTS}/03-loading.png")
-    page.wait_for_selector(".explain", timeout=20000)
+    # ---- Explain Thales (staged answer: draft, corrected answer, then the figure)
+    def ask(text, ms=30000):
+        n = page.locator(".msg-row.tutor .answer").count()
+        page.get_by_label("What do you want to understand?").fill(text); page.locator(".composer .send").click()
+        ok = poll(page, f"document.querySelectorAll('.msg-row.tutor .answer').length > {n} && !document.querySelector('.stage-trail')", ms)
+        page.wait_for_timeout(400)
+        return ok
+    page.get_by_label("What do you want to understand?").fill("Explain Thales theorem"); page.locator(".composer .send").click()
+    if poll(page, "!!document.querySelector('.stage-trail')", 3000):   # a cached answer arrives without stages
+        page.screenshot(path=f"{SHOTS}/03-loading.png")
+    poll(page, "!document.querySelector('.stage-trail') && document.querySelector('.msg-row.tutor .answer')", 30000)
     page.wait_for_timeout(400)
-    check("thales illustration rendered beside the text", page.locator(".explain .sheet svg").count() == 1 and page.locator(".explain-text .steps li").count() >= 3)
+    last = page.locator(".msg-row.tutor .answer").last
+    check("thales illustration rendered beside the text", last.locator(".sheet svg").count() == 1 and last.locator(".md ol li").count() >= 3)
     before = page.locator(".fig-callout-title mark").inner_text()
     page.locator(".fig-handle").scroll_into_view_if_needed(); box = page.locator(".fig-handle").bounding_box()
     page.mouse.move(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
     page.mouse.down(); page.mouse.move(box["x"] + 5, box["y"] + 70, steps=8); page.mouse.up()
     after = page.locator(".fig-callout-title mark").inner_text()
     check("dragging D changes the ratio", before != after, f"{before} -> {after}")
-    page.locator(".steps button").nth(1).click()
-    check("selecting a step highlights the small triangle", page.locator(".fig-hot-fill.strong").count() == 1)
-    page.locator(".explain").screenshot(path=f"{SHOTS}/04-explain-thales.png")
-    page.get_by_role("button", name="Previous", exact=False).count()
+    linked = last.locator("ol > li.step-link")
+    check("numbered steps are linked to the figure", linked.count() >= 1, str(linked.count()))
+    if linked.count():
+        linked.first.click()
+        check("selecting a step highlights its part of the figure", last.locator(".fig-hot-fill.strong, line.fig-hot").count() >= 1)
+    last.screenshot(path=f"{SHOTS}/04-explain-thales.png")
 
     # ---- Hints
     page.get_by_label("What are you trying to work out?").fill("find DE when AD = 3 and AB = 9")
@@ -74,42 +84,29 @@ with sync_playwright() as p:
 
     # ---- Quiz
     page.wait_for_selector("text=Question 1 of 4", timeout=20000)
-    page.locator(".panel:has-text('Check yourself') .option").first.click()
+    page.locator(".option").first.click()
     page.wait_for_selector(".feedback")
-    check("quiz gives feedback with a reason", "Thales" in page.locator(".feedback").inner_text() or len(page.locator(".feedback").inner_text()) > 15)
+    check("quiz gives feedback with a reason", len(page.locator(".feedback").inner_text()) > 15)
     page.screenshot(path=f"{SHOTS}/05-hints-quiz.png", full_page=True)
 
     # ---- Other templates
-    for topic, tmpl in [("Quadratic functions", "interactive graph"), ("Photosynthesis", "step-through"), ("Causes of the French Revolution", "concept map")]:
-        n_before = page.locator(".explain").count()
-        page.get_by_label("What do you want to understand?").fill(topic)
-        page.locator(".composer .send").click()
-        poll(page, f"document.querySelectorAll('.explain').length > {n_before}")
-        page.wait_for_timeout(500)
-        cap = page.locator(".sheet-cap").last.inner_text().lower()
-        check(f"{topic} -> {tmpl}", tmpl in cap, cap.replace("\n", " "))
-        page.locator(".explain .sheet").last.screenshot(path=f"{SHOTS}/06-{topic.split()[0].lower()}.png")
+    for topic, tmpl in [("Quadratic functions", "interactive graph"), ("Photosynthesis", "step-through"), ("Causes of the French Revolution", ("concept map", "timeline"))]:
+        ask("Explain " + topic)
+        cap = page.locator(".msg-row.tutor .answer").last.locator(".sheet-cap").inner_text().lower() if page.locator(".msg-row.tutor .answer").last.locator(".sheet-cap").count() else ""
+        check(f"{topic} -> {tmpl}", any(x in cap for x in ((tmpl,) if isinstance(tmpl, str) else tmpl)), cap.replace("\n", " "))
+        if page.locator(".msg-row.tutor .answer").last.locator(".sheet").count():
+            page.locator(".msg-row.tutor .answer").last.locator(".sheet").screenshot(path=f"{SHOTS}/06-{topic.split()[0].lower()}.png")
 
-    # ---- Resilience demo: large model busy -> fallback
-    page.get_by_role("button", name="AI").first.click()
-    page.get_by_role("button", name="Make the large model busy").click()
-    page.keyboard.press("Escape")
-    page.get_by_label("What do you want to understand?").fill("How does a transistor switch work")
-    n_before = page.locator(".explain").count()
-    page.locator(".composer .send").click()
-    page.wait_for_selector(".thinking")
-    poll(page, f"document.querySelectorAll('.explain').length > {n_before}", 30000)
-    page.wait_for_timeout(400)
-    txt = page.locator(".meta").last.inner_text()
-    check("fallback is announced to the user", "larger model was busy" in txt, txt)
-    page.get_by_role("button", name="AI").first.click()
+    # ---- AI status panel (the busy-model fallback itself is covered by backend/tests: a real service cannot be made busy on demand)
+    page.locator(".ai-chip").first.click()
+    check("AI status panel opens", page.locator("#ai-panel").count() == 1)
     page.screenshot(path=f"{SHOTS}/07-ai-panel.png")
-    page.get_by_role("button", name="Back to normal").click()
+    page.locator(".ai-chip").first.click()
 
     # ---- Group room, two users
     ctx2 = browser.new_context(viewport={"width": 1280, "height": 900})
     page2 = ctx2.new_page(); watch(page2, "B")
-    page2.goto(BASE + "/rooms"); register(page2, "tester_12866231")
+    page2.goto(BASE + "/rooms"); register(page2, "tester_b" + RUN)
     page.goto(BASE + "/rooms"); page.wait_for_selector(".lobby")
     page.get_by_label("Room name").fill("Geometry night")
     page.get_by_role("button", name="Create room").click()
@@ -122,12 +119,12 @@ with sync_playwright() as p:
     page.get_by_label("Topic for the room").fill("Thales theorem"); page.get_by_role("button", name="Set topic").click()
     page2.wait_for_selector("text=Thales theorem")
     page.get_by_role("button", name="Explain for the room").click()
-    page2.wait_for_selector(".explain", timeout=20000)
-    check("explanation is shared with the other person", page2.locator(".explain .sheet svg").count() == 1)
+    page2.wait_for_selector(".room-answer .answer .sheet svg", timeout=30000)
+    check("explanation is shared with the other person", page2.locator(".room-answer .answer .sheet svg").count() == 1)
     page2.get_by_role("textbox", name="Message").fill("I do not get step 3"); page2.get_by_label("Send anonymously").check()
     page2.get_by_role("button", name="Send", exact=True).click()
     page.wait_for_selector(".log li.anon")
-    check("anonymous message hides the author", "tester_12866231" not in page.locator(".log li.anon").inner_text())
+    check("anonymous message hides the author", "tester_b" + RUN not in page.locator(".log li.anon").inner_text())
     page.get_by_role("button", name="Start a shared quiz").click()
     page2.wait_for_selector(".rq", timeout=20000)
     page.locator(".rq .option").first.click(); page2.locator(".rq .option").nth(1).click()

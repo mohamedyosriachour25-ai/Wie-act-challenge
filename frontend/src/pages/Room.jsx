@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useAuth } from "../lib/auth.jsx";
 import { useT } from "../lib/i18n.jsx";
+import { useStudyClock } from "../lib/studyclock.js";
 import { useCycle, useFocusSignal, useRoomSocket } from "../lib/hooks.js";
 import { AuthGate, StageLoader, TimerRing } from "../components/Common.jsx";
-import { Explanation } from "../components/Study.jsx";
-import { AnswerCard, MaterialsPanel } from "../components/Materials.jsx";
+import { Answer, StageTrail } from "../components/Tutor.jsx";
+import { MaterialsPanel } from "../components/Materials.jsx";
+import { CompetitionPanel, compStep } from "../components/Competition.jsx";
+import { MicButton } from "../components/Voice.jsx";
 
 function RoomQuiz({ quiz, picks, onPick, onReveal, members }) {
   const t = useT();
@@ -54,15 +57,34 @@ function RoomQuiz({ quiz, picks, onPick, onReveal, members }) {
   );
 }
 
+/** Fold one staged-tutor event into the live view (same shape as Solo study's). */
+function liveStep(l, ev) {
+  const cur = l || { stages: [], startedAt: Date.now(), done: false, wantsFigure: true };
+  if (ev.type === "stage") return { ...cur, stages: [...cur.stages, ev.stage] };
+  if (ev.type === "intent") return { ...cur, intent: ev };
+  if (ev.type === "sources") return { ...cur, sources: ev.sources };
+  if (ev.type === "draft") return { ...cur, draft: ev.text };
+  if (ev.type === "final") return { ...cur, final: ev.text };
+  if (ev.type === "visual") return { ...cur, visual: ev.visual, visualFallback: ev.fallback, figureNote: ev.note, stepFocus: ev.step_focus };
+  return cur;
+}
+
+const titleOf = (text) => ((text || "").split("\n").find((ln) => ln.trim()) || "").replace(/^#+\s*/, "");
+
 function RoomView({ code }) {
   const { user } = useAuth();
   const t = useT();
+  useStudyClock("room");          // studying with friends: counts, a bit less than alone (scoring v2)
   const [room, setRoom] = useState(null);
   const [presence, setPresence] = useState({ members: [] });
   const [chat, setChat] = useState([]);
   const [timer, setTimer] = useState(null);
   const [topic, setTopic] = useState("");
   const [explanation, setExplanation] = useState(null);
+  const [live, setLive] = useState(null);   // the shared explanation being generated, stage by stage
+  const [liveAsk, setLiveAsk] = useState(null);  // a member's question to the material, stage by stage
+  const [comp, setComp] = useState(null);    // the room competition (client view)
+  const [you, setYou] = useState("");
   const [quiz, setQuiz] = useState(null);
   const [picks, setPicks] = useState({});
   const [busy, setBusy] = useState(null);
@@ -84,19 +106,28 @@ function RoomView({ code }) {
     switch (m.type) {
       case "snapshot":
         setRoom(m.room); setPresence(m.presence); setChat(m.chat); setTimer(m.timer); setTopic(m.topic); setTopicDraft(m.topic);
-        setExplanation(m.explanation); setQuiz(m.quiz); setBusy(m.busy); setQa([...(m.qa || [])].reverse());
+        setExplanation(m.explanation); setQuiz(m.quiz); setBusy(m.busy); setQa([...(m.qa || [])].reverse()); setYou(m.you);
+        setComp(m.competition ? { ...m.competition, qAt: Date.now(), leaderboard: m.competition.leaderboard } : null);
         setHistory(m.history || []); setSummary(m.summary || { text: "", at: 0 });
+        // work still being generated when you (re)joined: replay what is already done, the rest keeps arriving
+        setLive(m.live_explain ? m.live_explain.reduce(liveStep, null) : null);
+        setLiveAsk(m.live_ask ? { ...m.live_ask.events.reduce(liveStep, null), asker: m.live_ask.asker, question: m.live_ask.question } : null);
         break;
       case "presence": setPresence(m.presence); break;
       case "chat": setChat((c) => [...c.slice(-99), m.msg]); setHistory((h) => [...h, { id: m.msg.id, kind: "chat", author: m.msg.anon ? "" : m.msg.author, text: m.msg.text, ts: m.msg.ts, anon: m.msg.anon }]); break;
       case "timer": setTimer(m.timer); break;
-      case "topic": setTopic(m.topic); setTopicDraft(m.topic); setExplanation(null); setQuiz(null); setPicks({}); setAiError(null); setHistory((h) => [...h, { id: `top${Date.now()}`, kind: "topic", text: m.topic, ts: Date.now() / 1000 }]); break;
-      case "explanation": setExplanation(m.data); setAiError(null); setHistory((h) => [...h, { id: `exp${Date.now()}`, kind: "explanation", text: `${m.data.title}${m.data.summary ? " — " + m.data.summary : ""}`, ts: Date.now() / 1000 }]); break;
-      case "busy": setBusy(m.what); if (m.what) setAiError(null); break;
+      case "topic": setTopic(m.topic); setTopicDraft(m.topic); setExplanation(null); setLive(null); setQuiz(null); setPicks({}); setAiError(null); setHistory((h) => [...h, { id: `top${Date.now()}`, kind: "topic", text: m.topic, ts: Date.now() / 1000 }]); break;
+      case "tutor": setLive((l) => liveStep(l, m.event)); setExplanation(null); setAiError(null); break;
+      case "explanation": setExplanation(m.data); setLive(null); setAiError(null); setHistory((h) => [...h, { id: `exp${Date.now()}`, kind: "explanation", text: titleOf(m.data.text), ts: Date.now() / 1000 }]); break;
+      case "busy": setBusy(m.what); if (m.what) setAiError(null); if (!m.what) { setLive(null); setLiveAsk(null); } break;
+      case "tutor_ask": setLiveAsk((l) => ({ ...liveStep(l, m.event), asker: m.asker, question: m.question })); setAiError(null); break;
+      case "comp_preparing": case "comp_ready": case "comp_question": case "comp_ack": case "comp_progress": case "comp_reveal": case "comp_over":
+        setComp((c) => compStep(c, m)); break;
+      case "comp_cancelled": setComp(null); break;
       case "quiz": setQuiz(m.quiz); setPicks({}); break;
       case "quiz_progress": setQuiz((q) => (q ? { ...q, answered: m.answered } : q)); break;
       case "quiz_results": setQuiz((q) => (q ? { ...q, results: m.results } : q)); break;
-      case "answer": setQa((a) => [m.data, ...a].slice(0, 6)); setAiError(null); setHistory((h) => [...h, { id: `ans${Date.now()}`, kind: "answer", author: m.data.asker, text: `${m.data.question} → ${m.data.answer}`, ts: Date.now() / 1000 }]); break;
+      case "answer": setQa((a) => [m.data, ...a].slice(0, 6)); setLiveAsk(null); setAiError(null); setHistory((h) => [...h, { id: `ans${Date.now()}`, kind: "answer", author: m.data.asker, text: `${m.data.question} → ${titleOf(m.data.text || m.data.answer)}`, ts: Date.now() / 1000 }]); break;
       case "materials_changed": setMatKey((n) => n + 1); break;
       case "ai_error": setAiError(m); break;
       case "summary": setSummary(m.summary); break;
@@ -157,29 +188,62 @@ function RoomView({ code }) {
           {topic && <p className="current-topic">{t("Studying now:")} <mark>{topic}</mark></p>}
           <div className="row wrap">
             <button className="btn primary" disabled={!topic || !!busy} onClick={() => send({ type: "explain" })}>{t("Explain for the room")}</button>
-            <button className="btn" disabled={!topic || !!busy} onClick={() => send({ type: "quiz_start" })}>{t("Start a shared quiz")}</button>
+            <button className="btn" disabled={!topic || !!busy || (comp && comp.status !== "over")} onClick={() => send({ type: "quiz_start" })}>{t("Start a shared quiz")}</button>
           </div>
-          {busy && <StageLoader stages={busy === "quiz" ? [t("Choosing questions"), t("Writing answer options")] : busy === "ask" ? [t("Finding the right passages"), t("Writing the answer")] : [t("Designing the illustration"), t("Writing the explanation"), t("Checking the figure")]} />}
+          {busy === "quiz" && <StageLoader stages={[t("Choosing questions"), t("Writing answer options")]} />}
+          {busy === "ask" && !liveAsk && <StageLoader stages={[t("Finding the right passages"), t("Writing the answer")]} />}
+          {busy === "explain" && !live && <StageLoader stages={[t("Reading your material")]} />}
           {aiError && (
             <div className="error-box" role="alert">
               <p>{aiError.message}</p>
               {aiError.retry_after && <p className="small">{t("Try again in about {n} s.", { n: Math.ceil(aiError.retry_after) })}</p>}
             </div>
           )}
-          {!topic && <p className="muted">{t("Set a topic, then ask for an explanation. Everyone sees the same explanation and figure, and it costs one AI call.")}</p>}
-          {explanation && <Explanation data={explanation} />}
+          {!topic && <p className="muted">{t("Set a topic, then ask for an explanation. It is generated once for the whole room: everyone sees the same draft, answer and figure appear as they are ready.")}</p>}
+          {live && (
+            <section className="panel room-answer">
+              <StageTrail live={live} />
+              {(live.draft || live.final) && (
+                <Answer text={live.final || live.draft} isDraft={!live.final} sources={live.sources} visual={live.visual}
+                  visualFallback={live.visualFallback} figureNote={live.figureNote} wantsFigure pendingFigure={!live.visual} stepFocus={live.stepFocus} />
+              )}
+            </section>
+          )}
+          {explanation && !live && (
+            <section className="panel room-answer">
+              <Answer text={explanation.text} sources={explanation.sources} used={explanation.used} visual={explanation.visual}
+                visualFallback={explanation.visual_fallback} figureNote={explanation.figure_note} meta={explanation.meta} stepFocus={explanation.step_focus} />
+            </section>
+          )}
           <section className="panel">
             <h3>{t("Ask the room's material")}</h3>
             <form className="ask" onSubmit={(e) => { e.preventDefault(); if (question.trim().length >= 3) { send({ type: "ask", question }); setQuestion(""); } }}>
               <label className="grow">
                 {t("Question for everyone")}
-                <input value={question} onChange={(e) => setQuestion(e.target.value)} maxLength={300} placeholder={t("Type a question about the material")} />
+                <input value={question} onChange={(e) => setQuestion(e.target.value)} maxLength={500} placeholder={t("Type a question about the material")} />
               </label>
+              <MicButton disabled={!!busy} onText={(text) => setQuestion(text)} />
               <button className="btn" disabled={!!busy || question.trim().length < 3}>{t("Ask")}</button>
             </form>
-            {qa.length === 0 && <p className="muted small">{t("Answers are shared with the room and cite the document passages they come from.")}</p>}
-            {qa.map((a, i) => <AnswerCard key={i} data={a} />)}
+            {qa.length === 0 && !liveAsk && <p className="muted small">{t("Answers are shared with the room and cite the document passages they come from.")}</p>}
+            {liveAsk && (
+              <article className="room-qa live">
+                <p className="q"><strong>{liveAsk.asker}</strong> {t("asked:")} {liveAsk.question}</p>
+                <StageTrail live={{ ...liveAsk, wantsFigure: false }} />
+                {(liveAsk.draft || liveAsk.final) && <Answer text={liveAsk.final || liveAsk.draft} isDraft={!liveAsk.final} sources={liveAsk.sources} />}
+              </article>
+            )}
+            {qa.map((a, i) => (
+              <article key={i} className="room-qa">
+                <p className="q">{a.asker && <><strong>{a.asker}</strong> {t("asked:")} </>}{a.question}</p>
+                <Answer text={a.text || a.answer || ""} sources={a.sources} used={a.used} meta={a.meta} />
+              </article>
+            ))}
           </section>
+          <CompetitionPanel comp={comp} topic={topic} busy={busy} you={you} ownerHere={false}
+            onStart={() => send({ type: "comp_start" })}
+            onAnswer={(i, value) => { setComp((c) => ({ ...c, pending: value })); send({ type: "comp_answer", i, value }); }}
+            onStop={() => send({ type: "comp_stop" })} />
           {quiz && <RoomQuiz quiz={quiz} picks={picks} members={presence.members}
             onPick={(q, c) => { setPicks((p) => ({ ...p, [q]: c })); send({ type: "answer", q, choice: c }); }}
             onReveal={() => send({ type: "quiz_reveal" })} />}

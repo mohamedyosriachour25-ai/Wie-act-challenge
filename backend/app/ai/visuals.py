@@ -38,13 +38,67 @@ def _str(value, limit: int, default: str = "") -> str:
     return text[:limit] if text else default
 
 
+TEMPLATE_ALIASES = {
+    "process": "process_flow", "flow": "process_flow", "flowchart": "process_flow", "steps": "process_flow",
+    "cycle": "process_flow", "pipeline": "process_flow", "layers": "process_flow", "stack": "process_flow",
+    "conceptmap": "concept_map", "mindmap": "concept_map", "map": "concept_map", "graph": "concept_map",
+    "network": "concept_map", "tree": "concept_map", "hierarchy": "concept_map",
+    "chronology": "timeline", "history": "timeline", "compare": "comparison", "table": "comparison",
+    "plot": "function_plot", "function": "function_plot", "curve": "function_plot", "triangle": "thales",
+}
+LIST_KEYS = {
+    "process_flow": ("steps", "stages", "layers", "phases", "items", "levels", "nodes"),
+    "concept_map": ("nodes", "concepts", "items", "ideas"),
+    "timeline": ("events", "items", "dates", "steps"),
+}
+LABEL_KEYS = ("label", "name", "title", "concept", "step", "stage", "layer", "event", "term", "text")
+DETAIL_KEYS = ("detail", "details", "description", "desc", "note", "explanation", "summary", "role", "function", "definition")
+
+
+def _pick(item: dict, keys: tuple, limit: int) -> str:
+    for k in keys:
+        v = item.get(k)
+        if isinstance(v, (str, int, float)) and _str(v, limit):
+            return _str(v, limit)
+    return ""
+
+
+def _items(p: dict, template: str) -> list | None:
+    for k in LIST_KEYS.get(template, ()):
+        if isinstance(p.get(k), list):
+            return p[k]
+    return None
+
+
+def _template_name(spec: dict, p: dict) -> str | None:
+    """Small models often write the template name loosely ("Process Flow", "flowchart", "tcpip-layers") or
+    describe the parts without naming a template: map those to the catalogue instead of losing the figure."""
+    raw = re.sub(r"[^a-z_]", "", str(spec.get("template") or spec.get("type") or "").lower().replace(" ", "_").replace("-", "_"))
+    if raw in TEMPLATES:
+        return raw
+    flat = raw.replace("_", "")
+    for alias, name in TEMPLATE_ALIASES.items():
+        if flat == alias or alias in flat:
+            return name
+    if isinstance(p.get("events"), list):
+        return "timeline"
+    if isinstance(p.get("columns"), list) and isinstance(p.get("rows"), list):
+        return "comparison"
+    if isinstance(p.get("edges") or p.get("links"), list) or isinstance(p.get("nodes") or p.get("concepts"), list):
+        return "concept_map"
+    if any(isinstance(p.get(k), list) for k in LIST_KEYS["process_flow"]):
+        return "process_flow"
+    return None
+
+
 def sanitize_visual(spec) -> dict | None:
-    """Return a clean spec, or None when the template is unknown or unusable."""
+    """Return a clean spec, or None when nothing usable can be recovered from it."""
     if not isinstance(spec, dict):
         return None
-    template = spec.get("template")
     p = spec.get("params")
-    p = p if isinstance(p, dict) else {}
+    # parameters are sometimes written at the top level instead of under "params"
+    p = p if isinstance(p, dict) else {k: v for k, v in spec.items() if k not in ("template", "type", "rationale")}
+    template = _template_name(spec, p)
 
     if template == "thales":
         labels = p.get("labels")
@@ -68,48 +122,60 @@ def sanitize_visual(spec) -> dict | None:
         }
 
     if template == "process_flow":
-        raw = p.get("steps")
+        raw = _items(p, "process_flow")
         if not isinstance(raw, list):
             return None
         steps = []
         for item in raw[:7]:
             if isinstance(item, str):
-                item = {"label": item}
-            if isinstance(item, dict) and _str(item.get("label"), 40):
-                steps.append({"label": _str(item.get("label"), 40), "detail": _str(item.get("detail"), 140)})
+                label, _, detail = item.partition(":")
+                item = {"label": label, "detail": detail}
+            if isinstance(item, dict) and _pick(item, LABEL_KEYS, 40):
+                steps.append({"label": _pick(item, LABEL_KEYS, 40), "detail": _pick(item, DETAIL_KEYS, 140)})
         return {"template": "process_flow", "params": {"cycle": bool(p.get("cycle", False)), "steps": steps}} if len(steps) >= 3 else None
 
     if template == "concept_map":
-        raw = p.get("nodes")
+        raw = _items(p, "concept_map")
         if not isinstance(raw, list):
             return None
-        nodes, ids = [], set()
+        nodes, ids, by_label = [], set(), {}
         for i, item in enumerate(raw[:9]):
-            if not isinstance(item, dict) or not _str(item.get("label"), 30):
+            if isinstance(item, str):
+                item = {"label": item}
+            if not isinstance(item, dict) or not _pick(item, LABEL_KEYS, 30):
                 continue
             nid = _str(item.get("id"), 20, f"n{i}")
             if nid in ids:
                 nid = f"{nid}_{i}"
             ids.add(nid)
-            nodes.append({"id": nid, "label": _str(item.get("label"), 30), "note": _str(item.get("note"), 160)})
+            label = _pick(item, LABEL_KEYS, 30)
+            by_label[label.lower()] = nid
+            nodes.append({"id": nid, "label": label, "note": _pick(item, DETAIL_KEYS, 160)})
         if len(nodes) < 3:
             return None
         edges = []
-        for e in (p.get("edges") if isinstance(p.get("edges"), list) else [])[:14]:
-            if isinstance(e, dict) and e.get("from") in ids and e.get("to") in ids and e.get("from") != e.get("to"):
-                edges.append({"from": e["from"], "to": e["to"], "label": _str(e.get("label"), 20)})
+        raw_edges = p.get("edges") if isinstance(p.get("edges"), list) else p.get("links") if isinstance(p.get("links"), list) else []
+        for e in raw_edges[:14]:
+            if not isinstance(e, dict):
+                continue
+            a, b = e.get("from", e.get("source")), e.get("to", e.get("target"))
+            a = a if a in ids else by_label.get(str(a).lower())
+            b = b if b in ids else by_label.get(str(b).lower())
+            if a and b and a != b:
+                edges.append({"from": a, "to": b, "label": _str(e.get("label") or e.get("relation"), 20)})
         if not edges:
             edges = [{"from": nodes[0]["id"], "to": n["id"], "label": ""} for n in nodes[1:]]
         return {"template": "concept_map", "params": {"nodes": nodes, "edges": edges}}
 
     if template == "timeline":
-        raw = p.get("events")
+        raw = _items(p, "timeline")
         if not isinstance(raw, list):
             return None
         events = []
         for item in raw[:8]:
-            if isinstance(item, dict) and _str(item.get("label"), 40):
-                events.append({"date": _str(item.get("date"), 24, "?"), "label": _str(item.get("label"), 40), "detail": _str(item.get("detail"), 160)})
+            if isinstance(item, dict) and _pick(item, LABEL_KEYS, 40):
+                events.append({"date": _pick(item, ("date", "year", "time", "when", "period"), 24) or "?", "label": _pick(item, LABEL_KEYS, 40),
+                               "detail": _pick(item, DETAIL_KEYS, 160)})
         return {"template": "timeline", "params": {"events": events}} if len(events) >= 3 else None
 
     if template == "comparison":
@@ -178,7 +244,47 @@ def concept_map_from_steps(title: str, steps: list[dict]) -> dict:
     nodes = [{"id": "core", "label": _str(title, 30, "Topic"), "note": ""}]
     for i, step in enumerate(steps[:7]):
         text = step["text"]
-        label = _str(re.split(r"[.:;,]", text)[0], 28, f"Point {i + 1}")
+        label = _str(re.split(r"[.:;,(]| - | — ", text)[0], 28, f"Point {i + 1}")
         nodes.append({"id": f"s{i}", "label": label, "note": _str(text, 160)})
     edges = [{"from": "core", "to": n["id"], "label": ""} for n in nodes[1:]]
     return {"template": "concept_map", "params": {"nodes": nodes, "edges": edges}}
+
+
+def focus_labels(visual: dict | None) -> list[tuple[str, str]]:
+    """(focus key, words that name it) for every part of a figure a step can point at."""
+    if not visual:
+        return []
+    p, t = visual["params"], visual["template"]
+    if t == "thales":
+        return [(k, k) for k in ("ADE", "AB", "AC", "BC", "AD", "AE", "DE")]
+    if t == "function_plot":
+        return [("roots", "root roots zero zeros racine racines solution solutions")]
+    if t == "process_flow":
+        return [(str(i), s["label"]) for i, s in enumerate(p["steps"])]
+    if t == "timeline":
+        return [(str(i), f"{e['date']} {e['label']}") for i, e in enumerate(p["events"])]
+    if t == "comparison":
+        return [(str(i), r["label"]) for i, r in enumerate(p["rows"])]
+    return [(n["id"], n["label"]) for n in p.get("nodes", [])]
+
+
+def step_focus(steps: list[str], visual: dict | None) -> list[str]:
+    """For each numbered step of a written answer, the figure part it is about ("" when none): segment names
+    for Thales (exact, longest first), otherwise the label sharing the most words with the step. No AI call."""
+    import re
+
+    labels = focus_labels(visual)
+    if not labels:
+        return ["" for _ in steps]
+    words = lambda s: {w for w in re.findall(r"\w+", s.lower()) if len(w) >= 3}
+    out = []
+    for step in steps:
+        if visual["template"] == "thales":
+            found = [(m.start(), -len(k), k) for k, _ in labels for m in [re.search(rf"\b{k}\b", step)] if m]
+            hit = min(found)[2] if found else ""   # the part named first in the step
+        else:
+            sw = words(step)
+            best = max(labels, key=lambda kl: len(sw & words(kl[1])))
+            hit = best[0] if sw & words(best[1]) else ""
+        out.append(hit)
+    return out

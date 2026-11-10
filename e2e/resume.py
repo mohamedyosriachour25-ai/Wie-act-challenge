@@ -14,8 +14,8 @@ with sync_playwright() as p:
     pg.goto(BASE); reg(pg,f"rev{sfx}"); pg.wait_for_selector(".progress")
     pg.get_by_role("link",name="Solo study").first.click()
     pg.wait_for_selector(".welcome")
-    pg.locator(".composer input").fill("Thales theorem"); pg.locator(".composer .send").click()
-    pg.wait_for_selector(".explain",timeout=20000)
+    pg.locator(".composer textarea").fill("Explain Thales theorem"); pg.locator(".composer .send").click()
+    pg.wait_for_selector(".msg-row.tutor .answer .sheet svg",timeout=30000)
     # revision sheet panel in the side rail
     check("revision sheet button is offered", pg.get_by_role("button",name="Generate revision sheet").count()==1)
     pg.get_by_role("button",name="Generate revision sheet").click()

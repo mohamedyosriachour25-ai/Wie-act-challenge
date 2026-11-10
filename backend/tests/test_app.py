@@ -44,6 +44,9 @@ def recv_until(ws, kind, limit=20):
 
 def test_accounts_are_pseudonymous_and_validated(client):
     assert client.post("/api/auth/register", json={"pseudo": "a b", "password": "secret1"}).status_code == 400
+    # Non-Latin scripts are valid pseudos: the app is multilingual (Arabic, Darija, French).
+    assert client.post("/api/auth/register", json={"pseudo": "محمد_99", "password": "secret1"}).status_code == 200
+    assert client.post("/api/auth/register", json={"pseudo": "José-M", "password": "secret1"}).status_code == 200
     signup(client)
     assert client.post("/api/auth/register", json={"pseudo": "ADA_L", "password": "secret1"}).status_code == 409
     assert client.post("/api/auth/login", json={"pseudo": "ada_l", "password": "wrong"}).status_code == 401
@@ -89,7 +92,7 @@ def test_hint_ladder_and_quiz_flow_and_progress(client):
     assert ans["correct"] is True and ans["why"]
     client.post("/api/study/quiz/finish", json={"topic": topic, "correct": 3, "total": 4}, headers=h)
     p = client.get("/api/progress", headers=h).json()
-    assert p["quizzes"] == 1 and p["accuracy"] == 0.75 and p["xp"] == 10 + 5 + 30   # welcome + daily visit + 3 correct
+    assert p["quizzes"] == 1 and p["accuracy"] == 0.75 and p["xp"] == 10 + 2 + 30   # welcome + daily visit (v2: 2) + 3 correct
 
 
 def test_group_room_capacity_is_enforced(client):

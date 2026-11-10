@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, materials, phonetree, review, rooms, routes_study, scoring, security
+from . import auth, materials, phonetree, review, rooms, routes_study, scoring, security, spaces
 from .ai.gateway import Gateway
 from .config import Settings, load_settings
 from .db import DB
@@ -19,7 +19,7 @@ from .db import DB
 DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
-def create_app(settings: Settings | None = None, ai_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, ai_transport: httpx.AsyncBaseTransport | None = None, web_transport: httpx.AsyncBaseTransport | None = None, vector_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     """`ai_transport` is a hook for the test suite only (an httpx transport that stands in for the
     network): the running app never passes it, so it always talks to the real service over HTTP."""
     s = settings or load_settings()
@@ -30,10 +30,28 @@ def create_app(settings: Settings | None = None, ai_transport: httpx.AsyncBaseTr
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Documents whose indexing was cut short by a restart pick up where they stopped.
+        n = spaces.recover_interrupted(app.state.db)
+        if n:
+            log.info("%s tutor answer(s) were interrupted by the restart; their partial text is kept", n)
+        # documents analysed before concepts carried explanations and links are analysed again, once
+        for doc in app.state.db.all("SELECT id FROM docs WHERE kind='text' AND status='ready' AND summary<>'' AND summary NOT LIKE '%\"links\"%'"):
+            materials._later(app, materials.summarise_document(app, doc["id"], force=True))
+        for doc in app.state.db.all("SELECT id FROM docs WHERE status='reading'"):
+            log.info("resuming OCR of document %s", doc["id"])
+            asyncio.create_task(materials.ocr_document(app, doc["id"]))
         for doc in app.state.db.all("SELECT id FROM docs WHERE status IN ('indexing', 'waiting')"):
             log.info("resuming indexing of document %s", doc["id"])
             asyncio.create_task(materials.index_document(app, doc["id"]))
+        if app.state.vectors is not None:   # documents whose vectors never reached the platform index
+            task = asyncio.create_task(materials.sync_vectors(app))
+            app.state.bg_tasks.add(task)
+            task.add_done_callback(app.state.bg_tasks.discard)
         yield
+        for task in list(app.state.bg_tasks):
+            task.cancel()
+        await app.state.web.aclose()
+        if app.state.vectors is not None:
+            await app.state.vectors.aclose()
         await app.state.gateway.aclose()
         app.state.db.close()
 
@@ -45,8 +63,14 @@ def create_app(settings: Settings | None = None, ai_transport: httpx.AsyncBaseTr
     app.state.db.seed_live_rooms(s.live_capacity)
     app.state.hub = rooms.Hub()
     app.state.index_lock = asyncio.Lock()
+    app.state.ocr_lock = asyncio.Lock()
 
     app.state.gateway = Gateway(s, ai_transport)
+    from .ai.web import WebLookup
+    app.state.web = WebLookup(s.web_timeout_s, transport=web_transport)   # declared external source (Wikipedia)
+    app.state.bg_tasks = set()
+    from .vectors import make_store
+    app.state.vectors = make_store(s, app.state.db, transport=vector_transport)   # None = local index only
     from .ai.semcache import SemanticCache
     app.state.gateway.semcache = SemanticCache(app.state.gateway, s)
 
@@ -58,6 +82,7 @@ def create_app(settings: Settings | None = None, ai_transport: httpx.AsyncBaseTr
     app.include_router(phonetree.router)
     app.include_router(review.router)
     app.include_router(scoring.router)
+    app.include_router(spaces.router)
 
     @app.get("/api/health")
     def health():

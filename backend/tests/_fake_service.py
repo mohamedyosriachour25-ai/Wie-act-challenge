@@ -41,6 +41,10 @@ class FakeState:
         self.embed_stamp = time.monotonic()
         self.embed_calls = 0
         self.mid_saturated_until = 0.0
+        self.ocr_pages = 0
+        self.ocr_text = ("Photosynthesis takes place in the chloroplasts of plant cells. Chlorophyll absorbs light energy. "
+                         "The Calvin cycle builds glucose from carbon dioxide. Questions: prof.ben@uni.tn")
+        self.log: list[dict] = []    # every chat request received (model + messages), for prompt assertions
         self.calls = 0
 
     def _refill(self) -> None:
@@ -96,7 +100,7 @@ def kind_for(topic: str) -> str:
     """Which illustration template a topic should route to -- enough variety for the tests to
     exercise every template, including the two added for freer-form, topic-appropriate figures."""
     t = topic.lower()
-    if re.search(r"thal[eè]s|triangle|similar|proportion", t):
+    if re.search(r"thal[eè]s|طالس|triangle|similar|proportion", t):
         return "thales"
     if re.search(r"quadratic|parabola|function|linear|sine|sinus|exponential|equation|graph", t):
         return "function_plot"
@@ -250,7 +254,7 @@ def complete(messages: list[dict]) -> str:
                 pass
         return json.dumps(_quiz(topic))
     if task == "hint":
-        level = int((re.search(r"HINT_LEVEL:\s*(\d)", user) or [0, 1])[1])
+        level = int((re.search(r"Level (\d):", system) or [0, 1])[1])
         return {
             1: "What is the question really asking you to find? Say it in your own words first.",
             2: "Name the key idea or rule from the explanation that connects what you know to what you need.",
@@ -276,14 +280,88 @@ def complete(messages: list[dict]) -> str:
         n = int((re.search(r"(?:Give|Write) (\d+)", system) or [0, 6])[1])
         tag = lambda l, x: x if l == "en" else f"{x} ({l})"
         if task == "game_words":
-            return json.dumps({"words": [{l: tag(l, f"fixture word {i}") for l in langs} for i in range(n)]})
+            pool = ["volcano", "telescope", "pyramid", "compass", "rainbow", "magnet", "octopus", "lighthouse", "skeleton", "glacier", "satellite", "cactus"]
+            return json.dumps({"words": [{l: tag(l, pool[i % len(pool)]) for l in langs} for i in range(n)]})
         return json.dumps({"questions": [
             {"q": {l: tag(l, f"Fixture question {i}?") for l in langs},
              "options": [{l: tag(l, f"option {i}-{k}") for l in langs} for k in range(4)], "answer": i % 4}
             for i in range(n)]})
+    if task == "competition":
+        topic = _topic(user)
+        return json.dumps({"questions": [
+            {"type": "mcq", "q": f"Which statement about {topic} is right?", "options": ["The right one", "Wrong A", "Wrong B", "Wrong C"], "answer": 0, "why": "Because it is."},
+            {"type": "truefalse", "q": f"{topic} can be checked on an example.", "answer": True, "why": "Examples check ideas."},
+            {"type": "numeric", "q": "How many sides does a triangle have?", "answer": 3, "tolerance": 0, "unit": "", "why": "Tri means three."},
+            {"type": "exercise", "q": "A resistor of 10 ohm carries 2 A. What is the voltage?", "answer": 20, "tolerance": 0.5, "unit": "V", "why": "U = R x I = 10 x 2 = 20 V."},
+            {"type": "short", "q": "Which organelle makes ATP?", "answers": ["mitochondria", "mitochondrion"], "why": "The mitochondria."},
+        ]})
+    if task == "competition_check":
+        return user.split("QUESTIONS:\n", 1)[1]
+    if task == "doc_summary":
+        title = (re.search(r"TITLE: (.+)", user) or [None, "doc"])[1]
+        words = [w for w in re.findall(r"[A-Za-z]{6,}", user.split("PASSAGES:", 1)[-1])][:6]
+        return json.dumps({"subject": f"{title} course", "summary": f"This document about {title} explains " + ", ".join(words[:3]) + ".", "concepts": words})
+    if task == "intent":
+        return json.dumps(_intent(user))
+    if task in ("draft", "tutor"):
+        return _tutor_answer(task, system, user)
+    if task == "memory":
+        studied = re.findall(r"Student: (.+)", user)
+        prev = (re.search(r"PREVIOUS SUMMARY: (.+)", user) or [None, "(none)"])[1].strip()
+        merged = ("" if prev == "(none)" else prev.rstrip(".") + "; ") + "; ".join(s[:60] for s in studied[:6])
+        return ("The student studied: " + merged.replace("The student studied: ", "") + ".")
     if task == "repair":
         return user
     return "OK"
+
+
+def _intent(user: str) -> dict:
+    msg = (re.search(r"LATEST MESSAGE:\s*(.+)", user, re.S) or [None, user])[1].strip()
+    low = msg.lower()
+    prev = re.findall(r"Student: (.+)", user)
+    if re.match(r"(hi|hello|salut|bonjour|thanks|merci)\b", low):
+        intent = "chat"
+    elif re.search(r"\b(exercise|exercice|quiz me|test me)\b", low):
+        intent = "practice"
+    elif re.match(r"(explain|what is|what are|explique|qu'est|اشرح|إشرح|فسر|شنوة|ما هي|ما هو)", low) and not re.search(r"\b(it|that|another|ça)\b", low):
+        intent = "explain"                       # a request that names its own topic is a new topic, however short
+    elif prev and (len(msg.split()) <= 2 or re.search(r"\b(it|that|this|why|another|more|ça|pourquoi)\b", low)):
+        intent = "follow_up"
+    else:
+        intent = "question"
+    topic = _topic("TOPIC: " + (prev[-1] if intent == "follow_up" else msg))
+    standalone = f"{msg} (about {topic})" if intent == "follow_up" else msg
+    return {"intent": intent, "standalone": standalone, "topic": topic, "level": "beginner",
+            "needs_web": bool(re.search(r"\b(who|when|where|qui|quand)\b", low)), "figure": intent == "explain"}
+
+
+def _tutor_answer(task: str, system: str, user: str) -> str:
+    req = (re.search(r"REQUEST:\s*(.+)", user) or [None, "the topic"])[1].strip()
+    # like a real model: answer from the source sentence that best matches the request
+    want = {w for w in re.findall(r"[a-z]{4,}", req.lower())}
+    best = None
+    for m in re.finditer(r"^\[(\d+)\] \([^)]*\) (.+)$", user, re.M):
+        for sent in re.split(r"(?<=[.!?])\s+", m.group(2)):
+            score = len(want & set(re.findall(r"[a-z]{4,}", sent.lower())))
+            if sent.strip() and (best is None or score > best[0]):
+                best = (score, m.group(1), sent.strip())
+    cite = f" [{best[1]}]" if best else ""
+    fact = best[2] if best else f"{req} is explained here"
+    if task == "draft":
+        return f"Quick draft: {fact}{cite}"
+    revised = " (revised from the draft)" if "DRAFT:" in user else ""
+    if "## <short title>" in system:
+        if "thales" in req.lower():    # like a real model, a geometry answer names the segments it talks about
+            steps = f"1. Look at the small triangle ADE inside ABC{cite}.\n2. Because DE is parallel to BC, AD/AB = AE/AC.\n3. The same ratio gives DE from BC.\n"
+        else:
+            steps = f"1. Start from the definition{cite}.\n2. Look at how the parts connect.\n3. Check it on a small example.\n"
+        return (
+            f"## {req[:60]}\nIn short: {fact}{cite}{revised}\n" + steps +
+            "**In daily life:** you meet this idea every day.\n**Common mistake:** skipping the definition."
+        )
+    if "ONE exercise" in system:
+        return f"Exercise: apply {req[:60]} to a small case.\n**Hint:** start from the definition."
+    return f"{fact}{cite}{revised}"
 
 
 STOPWORDS = frozenset(
@@ -308,7 +386,7 @@ def lexical_embedding(text: str) -> list[float]:
 # ------------------------------------------------------------------- the httpx fake transport
 def build_fake(models: dict[str, str] | None = None) -> tuple[httpx.MockTransport, FakeState]:
     """`models` maps model name -> "compact"|"mid" (defaults match app.config.Settings' defaults)."""
-    models = models or {"compact-1b": "compact", "mid-8b": "mid"}
+    models = models or {"compact-1b": "compact", "mid-8b": "mid", "deepseek-ocr": "ocr"}
     state = FakeState()
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -356,7 +434,15 @@ def build_fake(models: dict[str, str] | None = None) -> tuple[httpx.MockTranspor
                 headers={"Retry-After": str(secs), "X-Quota-Remaining": "0"},
             )
         state.calls += 1
-        text = complete(body["messages"])
+        state.log.append({"model": body["model"], "messages": body["messages"]})
+        if cls == "ocr":   # the OCR model: one image in, the page's text out
+            image = next((c for c in body["messages"][-1]["content"] if isinstance(c, dict) and c.get("type") == "image_url"), None)
+            if not image or not image["image_url"]["url"].startswith("data:image/"):
+                return httpx.Response(400, json={"error": {"message": "An image is required."}})
+            state.ocr_pages += 1
+            text = state.ocr_text
+        else:
+            text = complete(body["messages"])
         prompt_tokens = sum(len(m["content"]) for m in body["messages"]) // 4
         return httpx.Response(
             200,

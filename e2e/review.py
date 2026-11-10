@@ -19,9 +19,9 @@ with sync_playwright() as p:
     pg.goto(BASE+"/study"); reg(pg,f"rv{random.randint(1000,9999)}")
     pg.wait_for_selector(".welcome")
     # explain a topic, then take the quiz
-    pg.get_by_label("What do you want to understand?").fill("Thales theorem")
+    pg.get_by_label("What do you want to understand?").fill("Explain Thales theorem")
     pg.get_by_role("button",name="Explain it").click()
-    pg.wait_for_selector(".explain", timeout=20000)
+    pg.wait_for_selector(".msg-row.tutor .answer", timeout=30000)
     pg.wait_for_selector(".panel:has-text('Check yourself') .option", timeout=20000)
     for _ in range(8):
         opts=pg.locator(".panel:has-text('Check yourself') .option")

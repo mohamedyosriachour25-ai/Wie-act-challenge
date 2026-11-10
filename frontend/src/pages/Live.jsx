@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api.js";
 import { useAttention, useCycle, useFocusSignal, useRoomSocket, useVideoMesh } from "../lib/hooks.js";
 import { tx, useT } from "../lib/i18n.jsx";
+import { useStudyClock } from "../lib/studyclock.js";
 import { AuthGate, Dots, TimerRing } from "../components/Common.jsx";
 import DrawBoard from "../components/DrawBoard.jsx";
 import Notepad from "../components/Notepad.jsx";
@@ -477,6 +478,7 @@ function LiveRoomView({ code }) {
   const mesh = useVideoMesh(send, myId);
   signalRef.current = mesh.signal;
   const cycle = useCycle(timer, now);
+  useStudyClock(cycle?.phase === "focus" ? "live" : null, { idleMs: 15 * 60 * 1000 });   // focus minutes count; a break does not (reading on paper is fine: 15 min idle allowed)
   const attention = useAttention(watch && share, cycle?.phase === "focus"); // camera only runs during focus
   const focused = useFocusSignal(share, attention.status === "running" ? attention.attentive : null);
 

@@ -82,7 +82,9 @@ def test_plain_course_text_passes_the_guard():
 
 def test_upload_rules(client):
     t = signup(client, "ada_l")
-    assert upload(client, t, "Write to me at a@b.com " + PHOTO).status_code == 400
+    # personal details no longer refuse the document: they are removed before anything is indexed or sent
+    r = upload(client, t, "Write to me at a@b.com " + PHOTO)
+    assert r.status_code == 200 and r.json()["note"] == {"removed": 1}
     assert upload(client, t, "too short").status_code == 400
     assert upload(client, t, PHOTO, name="slides.pptx").status_code == 400
     assert client.post("/api/materials/file", content=PHOTO.encode()).status_code == 401
@@ -99,6 +101,24 @@ def test_upload_is_indexed_in_the_background_then_answers_with_sources(client):
     out = client.post("/api/materials/ask", json={"scope": "me", "question": "Where does photosynthesis take place?"}, headers=auth(t)).json()
     assert out["grounded"] is True and out["sources"] and out["sources"][0]["title"] == "bio"
     assert "[1]" in out["answer"] and "chloroplasts" in out["answer"].lower()
+
+
+def test_documents_work_without_embeddings(client):
+    """If the embeddings endpoint is unavailable, a document is still added (keyword search)
+    and grounded answers still work, instead of the upload being marked failed."""
+    from app.ai.gateway import AIError
+
+    async def no_embeddings(texts, batch=32):
+        raise AIError("bad_request", "No embeddings model.", status=400)
+
+    client.app.state.gateway.embed = no_embeddings
+    t = signup(client, "lex_learner")
+    assert upload(client, t, PHOTO).status_code == 200
+    docs = wait_ready(client, t)  # ready via keyword fallback, not "failed"
+    assert docs[0]["status"] == "ready"
+
+    out = client.post("/api/materials/ask", json={"scope": "me", "question": "Where does photosynthesis take place?"}, headers=auth(t)).json()
+    assert out["grounded"] is True and out["sources"] and "chloroplasts" in out["answer"].lower()
 
 
 def test_unrelated_question_makes_no_generation_call(client):
@@ -154,7 +174,8 @@ def test_room_material_needs_membership_and_is_shared(client):
                     seen.append(m["data"])
                     break
         assert len(seen) == 2 and seen[0] == seen[1]
-        assert seen[0]["grounded"] and seen[0]["asker"] == "alice" and "ATP" in seen[0]["answer"]
+        assert seen[0]["grounded"] and seen[0]["asker"] == "alice" and "ATP" in seen[0]["text"]
+        assert seen[0]["sources"][0]["kind"] == "material"
 
 
 def test_room_explanation_is_grounded_in_its_material(client):
@@ -167,10 +188,18 @@ def test_room_explanation_is_grounded_in_its_material(client):
         wait_ready(client, ta, scope=code)
         a.send_json({"type": "topic", "topic": "photosynthesis"})
         a.send_json({"type": "explain"})
-        for _ in range(25):
+        staged = []
+        for _ in range(60):
             m = a.receive_json()
+            if m["type"] == "tutor":
+                ev = m["event"]
+                staged.append("stage:" + ev["stage"] if ev["type"] == "stage" else ev["type"])
             if m["type"] == "explanation":
-                assert "bio" in (m["data"].get("grounded_in") or [])
+                assert [s["title"] for s in m["data"]["sources"] if s["kind"] == "material"] == ["bio"]
+                assert "chloroplasts" in m["data"]["text"] and m["data"]["visual"]
+                # the room sees partial results before the final explanation, text before figure
+                assert staged.index("sources") < staged.index("draft") < staged.index("final") < staged.index("visual")
+                assert "intent" in staged and "stage:understanding" not in staged   # the topic is explicit: no intent call
                 return
         raise AssertionError("no explanation")
 

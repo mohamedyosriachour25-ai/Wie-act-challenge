@@ -50,9 +50,25 @@ class Settings:
     login_attempts: int = 8           # failed sign-ins per 5 minutes, per connection and per pseudo
     register_per_hour: int = 15       # accounts created per connection per hour
     max_body_bytes: int = 4 * 1024 * 1024
+    max_pdf_bytes: int = 20 * 1024 * 1024   # PDFs (scanned course books are large); other uploads stay at 3 MB
+    ocr_model: str = "deepseek-ocr"   # reads scanned PDF pages; empty = keep scanned PDFs as files only
+    ocr_max_pages: int = 40           # scanned pages read per PDF (each page is one OCR call)
     video_capacity: int = 9           # cameras sharing one room at once (peer-to-peer mesh; an SFU would lift this)
     event_lead_s: int = 300           # how long before a break the group-game invite opens (clamped to the focus length)
     event_min_players: int = 2        # a group game needs at least this many people who opted in
+    # Study-space tutor. The service answers whole (no streaming, per the guide), so the app shows partial
+    # results by stage: intent -> sources -> compact quick draft -> mid-size final answer -> mid-size figure.
+    quick_draft: bool = True          # draft-then-revise: a compact draft is shown first, the mid-size model corrects it
+    web_search: bool = True           # declared external source: Wikipedia lookups when the material does not cover a question
+    web_timeout_s: float = 3.5        # a slow lookup is dropped, never waited on
+    memory_window: int = 6            # recent messages sent verbatim with every turn
+    memory_fold_after: int = 10       # older messages beyond the window are folded into the space summary past this many
+    max_spaces: int = 12              # study spaces per learner
+    # RAG index. The guide: "a vector database is deployed by the platform, with one dedicated collection per team".
+    vector_backend: str = "local"     # local | qdrant | chroma  (scripts/probe_platform.py tells which one the platform runs)
+    vector_url: str = ""              # the platform vector database URL
+    vector_collection: str = "herwiego"  # the team's collection name given by the organisers
+    vector_api_key: str = ""          # defaults to the AI key (one team key)
 
     @property
     def is_production(self) -> bool:
@@ -99,6 +115,19 @@ def load_settings(**overrides) -> Settings:
         video_capacity=int(env("HERWIEGO_VIDEO_CAPACITY", "9")),
         event_lead_s=int(env("HERWIEGO_EVENT_LEAD_S", "300")),
         event_min_players=int(env("HERWIEGO_EVENT_MIN_PLAYERS", "2")),
+        quick_draft=env("HERWIEGO_QUICK_DRAFT", "1") != "0",
+        web_search=env("HERWIEGO_WEB_SEARCH", "1") != "0",
+        web_timeout_s=float(env("HERWIEGO_WEB_TIMEOUT_S", "3.5")),
+        memory_window=int(env("HERWIEGO_MEMORY_WINDOW", "6")),
+        memory_fold_after=int(env("HERWIEGO_MEMORY_FOLD_AFTER", "10")),
+        max_spaces=int(env("HERWIEGO_MAX_SPACES", "12")),
+        max_pdf_bytes=int(float(env("HERWIEGO_MAX_PDF_MB", "20")) * 1024 * 1024),
+        ocr_model=env("HERWIEGO_OCR_MODEL", "deepseek-ocr").strip(),
+        ocr_max_pages=int(env("HERWIEGO_OCR_MAX_PAGES", "40")),
+        vector_backend=env("HERWIEGO_VECTOR_BACKEND", "local").strip().lower(),
+        vector_url=env("HERWIEGO_VECTOR_URL", "").strip(),
+        vector_collection=env("HERWIEGO_VECTOR_COLLECTION", "herwiego").strip() or "herwiego",
+        vector_api_key=env("HERWIEGO_VECTOR_API_KEY", "") or env("HERWIEGO_API_KEY", ""),
     )
     settings = dataclasses.replace(settings, **overrides) if overrides else settings
     problems = settings.startup_problems()

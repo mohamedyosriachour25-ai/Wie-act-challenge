@@ -39,6 +39,7 @@ with sync_playwright() as p:
     check("thumbnail image loads its bytes", ok)
 
     # lightbox opens
+    page.locator(".gallery .thumb").evaluate("e => e.scrollIntoView({block: 'center'})")   # keep it clear of the sticky header
     page.locator(".gallery .thumb").click()
     page.wait_for_selector(".lightbox img")
     check("clicking a thumbnail opens the lightbox", page.locator(".lightbox").count() == 1)
@@ -54,6 +55,7 @@ with sync_playwright() as p:
     page.wait_for_selector(".docs li")
     check("text note and image coexist", page.locator(".docs li").count() == 1 and page.locator(".gallery li").count() == 1)
     # remove the image
+    page.locator(".gallery li").evaluate("e => e.scrollIntoView({block: 'center'})")
     page.locator(".gallery li").get_by_role("button", name="Remove").click()
     page.wait_for_function if False else None
     ok2 = False

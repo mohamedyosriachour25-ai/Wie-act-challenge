@@ -1,54 +1,116 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 import { useAuth } from "../lib/auth.jsx";
 import { tx, useT } from "../lib/i18n.jsx";
 import { AuthGate } from "../components/Common.jsx";
-import { AskMaterial, MaterialsPanel } from "../components/Materials.jsx";
-import { ErrorNote, Explanation, HintLadder, ProgressPanel, RevisionSheet, SoloQuiz, STYLE_NAME } from "../components/Study.jsx";
+import { MaterialsPanel } from "../components/Materials.jsx";
+import { ErrorNote, ProgressPanel, RevisionSheet, STYLE_NAME } from "../components/Study.jsx";
+import { SpaceTutor } from "../components/SpaceTutor.jsx";
+import { useStudyClock } from "../lib/studyclock.js";
 
-const THINK = [tx("Designing the illustration"), tx("Writing the explanation"), tx("Checking the figure")];
+const SPACE_KEY = "herwiego.space";
+const remember = (id) => { try { localStorage.setItem(SPACE_KEY, String(id)); } catch { /* not kept */ } };
+const recalled = () => { try { return Number(localStorage.getItem(SPACE_KEY)) || null; } catch { return null; } };
 
-function Thinking() {
+/* ------------------------------------------------------------------ space switcher */
+function SpaceBar({ spaces, current, onPick, onChanged, max }) {
   const t = useT();
-  const [i, setI] = useState(0);
-  useEffect(() => { const id = setInterval(() => setI((n) => (n + 1) % THINK.length), 1400); return () => clearInterval(id); }, []);
+  const [mode, setMode] = useState(null);      // null | "new" | "rename" | "delete"
+  const [name, setName] = useState("");
+  const [error, setError] = useState(null);
+  const space = spaces.find((s) => s.id === current);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    try {
+      if (mode === "new") {
+        const created = await api("/api/spaces", { method: "POST", body: { name } });
+        await onChanged(created.id);
+      } else if (mode === "rename") {
+        await api(`/api/spaces/${current}`, { method: "PATCH", body: { name } });
+        await onChanged(current);
+      }
+      setMode(null); setName("");
+    } catch (err) {
+      setError(err);
+    }
+  };
+  const remove = async () => {
+    setError(null);
+    try {
+      await api(`/api/spaces/${current}`, { method: "DELETE" });
+      setMode(null);
+      await onChanged(null);
+    } catch (err) {
+      setError(err);
+    }
+  };
+
   return (
-    <div className="thinking" aria-live="polite">
-      <span className="typing"><i /><i /><i /></span>
-      <span className="muted small">{t(THINK[i])}…</span>
+    <div className="space-bar">
+      <div className="space-tabs" role="tablist" aria-label={t("Study spaces")}>
+        {spaces.map((s) => (
+          <button key={s.id} role="tab" aria-selected={s.id === current} className={`space-tab${s.id === current ? " on" : ""}`} onClick={() => onPick(s.id)}>
+            <span className="space-name">{s.name}</span>
+            <span className="space-count small">{t(s.docs === 1 ? tx("{n} doc") : tx("{n} docs"), { n: s.docs })}</span>
+          </button>
+        ))}
+        {spaces.length < max && (
+          <button className="space-tab add" onClick={() => { setMode("new"); setName(""); }} aria-label={t("New study space")}>+ {t("New space")}</button>
+        )}
+      </div>
+      {space && mode === null && (
+        <div className="space-actions small">
+          <button className="link small" onClick={() => { setMode("rename"); setName(space.name); }}>{t("Rename")}</button>
+          {!space.primary && <button className="link small danger" onClick={() => setMode("delete")}>{t("Delete space")}</button>}
+        </div>
+      )}
+      {(mode === "new" || mode === "rename") && (
+        <form className="space-form" onSubmit={submit}>
+          <input autoFocus value={name} maxLength={40} onChange={(e) => setName(e.target.value)} placeholder={t("Name, e.g. Organic chemistry")} aria-label={t("Space name")} />
+          <button className="btn small primary" disabled={!name.trim()}>{mode === "new" ? t("Create") : t("Save")}</button>
+          <button type="button" className="btn small" onClick={() => setMode(null)}>{t("Cancel")}</button>
+        </form>
+      )}
+      {mode === "delete" && (
+        <div className="space-form">
+          <span className="small">{t("Delete this space, its material and its conversation?")}</span>
+          <button className="btn small danger" onClick={remove}>{t("Delete")}</button>
+          <button className="btn small" onClick={() => setMode(null)}>{t("Cancel")}</button>
+        </div>
+      )}
+      <ErrorNote error={error} />
     </div>
   );
 }
 
+/* ------------------------------------------------------------------------- page */
 function SoloSpace() {
   const { user } = useAuth();
   const t = useT();
-  const [topic, setTopic] = useState("");
-  const [turns, setTurns] = useState([]);   // { topic, data }
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
+  useStudyClock("solo");
+  const [spaces, setSpaces] = useState([]);
+  const [current, setCurrent] = useState(null);
+  const [meta, setMeta] = useState({ max: 12, web: true });
+  const [useWeb, setUseWeb] = useState(true);
   const [refresh, setRefresh] = useState(0);
-  const endRef = useRef(null);
+  const [error, setError] = useState(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [turns, busy]);
+  const loadSpaces = useCallback(async (pick) => {
+    const data = await api("/api/spaces");
+    setSpaces(data.spaces);
+    setMeta({ max: data.max, web: data.web_search });
+    const wanted = pick ?? recalled();
+    const chosen = data.spaces.find((s) => s.id === wanted) || data.spaces[0];
+    setCurrent(chosen?.id ?? null);
+    if (chosen) remember(chosen.id);
+  }, []);
 
-  const ask = async (q = topic) => {
-    const asked = q.trim();
-    if (asked.length < 2 || busy) return;
-    setError(null); setBusy(true); setTopic("");
-    setTurns((ts) => [...ts, { topic: asked, data: null }]);
-    try {
-      const data = await api("/api/study/explain", { method: "POST", body: { topic: asked } });
-      setTurns((ts) => ts.map((x, i) => (i === ts.length - 1 ? { ...x, data } : x)));
-      setRefresh((n) => n + 1);
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => { loadSpaces().catch(setError); }, [loadSpaces]);
+  const pick = (id) => { setCurrent(id); remember(id); };
+  const space = spaces.find((s) => s.id === current);
 
-  const started = turns.length > 0;
   return (
     <div className="tutor">
       <div className="tutor-main">
@@ -60,61 +122,21 @@ function SoloSpace() {
               : t("Explaining in a balanced style.")}
           </p>
         </div>
-
-        <div className="thread">
-          {!started && (
-            <div className="welcome msg-in">
-              <h2>{t("Ask your tutor anything")}</h2>
-              <p className="muted">{t("Every answer comes with a figure you can drag and explore, hints when you're stuck, and a quick quiz to check yourself.")}</p>
-            </div>
-          )}
-
-          {turns.map((turn, i) => (
-            <div className="exchange" key={i}>
-              <div className="msg-row you"><div className="bubble msg-in">{turn.topic}</div></div>
-              {turn.data ? (
-                <div className="msg-row tutor">
-                  <div className="avatar-sm" aria-hidden="true">H</div>
-                  <div className="bubble tutor-card msg-in">
-                    <Explanation data={turn.data} />
-                    {i === turns.length - 1 && (
-                      <div className="turn-tools">
-                        <HintLadder topic={turn.data.topic} />
-                        <SoloQuiz topic={turn.data.topic} level={turn.data.level} onFinish={() => setRefresh((n) => n + 1)} />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : busy && i === turns.length - 1 ? (
-                <div className="msg-row tutor">
-                  <div className="avatar-sm" aria-hidden="true">H</div>
-                  <div className="bubble tutor-card msg-in"><Thinking /></div>
-                </div>
-              ) : null}
-            </div>
-          ))}
-
-          {error && <ErrorNote error={error} onRetry={() => ask(turns[turns.length - 1]?.topic || "")} />}
-          <div ref={endRef} />
-        </div>
-
-        <form className="composer" onSubmit={(e) => { e.preventDefault(); ask(); }}>
-          <input
-            aria-label={t("What do you want to understand?")}
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder={started ? t("Ask a follow-up, or a new topic") : t("Type the topic you want explained")}
-            maxLength={160}
-          />
-          <button className="btn primary send" disabled={busy || topic.trim().length < 2}>{busy ? t("Working") : started ? t("Ask") : t("Explain it")}</button>
-        </form>
+        <ErrorNote error={error} />
+        <SpaceBar spaces={spaces} current={current} onPick={pick} max={meta.max} onChanged={(id) => loadSpaces(id).catch(setError)} />
+        {space && (
+          <SpaceTutor key={space.id} space={space} useWeb={useWeb} setUseWeb={setUseWeb} webAvailable={meta.web}
+            onActivity={() => { setRefresh((n) => n + 1); loadSpaces(space.id).catch(() => {}); }} />
+        )}
       </div>
 
       <aside className="tutor-side">
+        {space && (
+          <MaterialsPanel key={space.id} scope={`space-${space.id}`} reloadKey={refresh}
+            heading={t("Material of “{name}”", { name: space.name })} note={t("The tutor reads this material before answering in this space.")} />
+        )}
         <ProgressPanel refreshKey={refresh} />
         <RevisionSheet reloadKey={refresh} />
-        <MaterialsPanel scope="me" reloadKey={refresh} />
-        <AskMaterial scope="me" />
       </aside>
     </div>
   );

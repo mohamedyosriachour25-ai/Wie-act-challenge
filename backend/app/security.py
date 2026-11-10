@@ -186,7 +186,8 @@ class Guard(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         s = request.app.state.settings
         rid = uuid.uuid4().hex[:10]
-        if int(request.headers.get("content-length") or 0) > s.max_body_bytes:
+        cap = s.max_pdf_bytes + 65536 if request.url.path == "/api/materials/file" else s.max_body_bytes
+        if int(request.headers.get("content-length") or 0) > cap:
             return JSONResponse({"detail": tr(lang_of(request), "That request is too large.")}, status_code=413)
         started = time.perf_counter()
         try:
@@ -201,7 +202,7 @@ class Guard(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=()"   # microphone: opt-in dictation (Lot 15)
         if not request.url.path.startswith("/api/"):
             response.headers.setdefault("Content-Security-Policy", CSP)
         if request.url.path.startswith("/api/"):

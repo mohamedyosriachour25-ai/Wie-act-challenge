@@ -12,6 +12,7 @@ What it does (each point maps to a line of the challenge guide):
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -57,6 +58,7 @@ class Metrics:
 
     def reset(self) -> None:
         self.calls = {"compact": 0, "mid": 0}
+        self.ocr_calls = 0        # scanned PDF pages read by the OCR model (kept apart from the compact/mid split)
         self.tokens_in = {"compact": 0, "mid": 0}
         self.tokens_out = {"compact": 0, "mid": 0}
         self.cache_hits = 0
@@ -72,6 +74,12 @@ class Metrics:
         self.errors = 0
         self.embeddings = 0       # passages embedded
         self.embed_calls = 0      # calls to the separately metered embeddings endpoint
+        self.embed_cache_hits = 0 # passages whose embedding came from the persistent content cache (no call)
+        self.vector_searches = 0  # searches answered by the platform vector index
+        self.vector_fallbacks = 0 # searches answered by the local mirror because the platform index failed
+        # Study-space tutor: answers arrive whole (guide), so the app shows partial results by stage.
+        self.first_text_ms: list[int] = []    # time to the first visible text (quick draft) of a tutor turn, last 50
+        self.final_text_ms: list[int] = []    # time to the revised final answer, last 50
 
     def to_dict(self) -> dict:
         total = sum(self.calls.values())
@@ -91,9 +99,23 @@ class Metrics:
             "bad_requests": self.bad_requests,
             "repairs": self.repairs,
             "errors": self.errors,
+            "ocr_calls": self.ocr_calls,
             "embeddings": self.embeddings,
             "embed_calls": self.embed_calls,
+            "embed_cache_hits": self.embed_cache_hits,
+            "vector_searches": self.vector_searches,
+            "vector_fallbacks": self.vector_fallbacks,
+            "first_text_ms_median": _median(self.first_text_ms),
+            "final_text_ms_median": _median(self.final_text_ms),
         }
+
+    def record(self, series: list[int], ms: float) -> None:
+        series.append(int(ms))
+        del series[:-50]
+
+
+def _median(xs: list[int]) -> int | None:
+    return sorted(xs)[len(xs) // 2] if xs else None
 
 
 def extract_json(text: str):
@@ -168,7 +190,8 @@ class Gateway:
     # ----------------------------------------------------------------- core
     @staticmethod
     def _key(cls: str, messages: list[dict], max_tokens: int, temperature: float) -> str:
-        norm = [{"role": m["role"], "content": re.sub(r"\s+", " ", m["content"]).strip()} for m in messages]
+        norm = [{"role": m["role"], "content": re.sub(r"\s+", " ", m["content"]).strip() if isinstance(m["content"], str) else m["content"]}
+                for m in messages]   # multimodal content (an OCR page image) is hashed as is
         raw = json.dumps([cls, norm, max_tokens, temperature], sort_keys=True)
         return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -240,7 +263,7 @@ class Gateway:
 
         while True:
             attempts += 1
-            model = self.s.compact_model if eff == "compact" else self.s.mid_model
+            model = {"compact": self.s.compact_model, "mid": self.s.mid_model, "ocr": self.s.ocr_model}[eff]
 
             cooldown = self.cooldown_until - time.time()
             if cooldown > 0:
@@ -278,6 +301,9 @@ class Gateway:
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"] or ""
                 usage = data.get("usage", {})
+                if eff == "ocr":
+                    self.metrics.ocr_calls += 1
+                    return text, CallMeta(cls=eff, task=task, model=model, degraded=False, waited_ms=int(waited * 1000), attempts=attempts)
                 self.metrics.calls[eff] += 1
                 self.metrics.tokens_in[eff] += int(usage.get("prompt_tokens", 0))
                 self.metrics.tokens_out[eff] += int(usage.get("completion_tokens", 0))
@@ -376,6 +402,19 @@ class Gateway:
             except (ValueError, KeyError, TypeError):
                 pass
         return None, meta
+
+    async def ocr(self, image: bytes, mime: str = "image/jpeg") -> str:
+        """Text of one scanned page, read by the service's OCR model (DeepSeek-OCR's plain "Free OCR." prompt).
+        Same quota, retry and error handling as every other call; never cached across pages (each image differs)."""
+        if not self.s.ocr_model:
+            raise AIError("bad_request", "No OCR model is configured.", status=400)
+        url = f"data:{mime};base64," + base64.b64encode(image).decode()
+        messages = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": "Free OCR."},
+        ]}]
+        text, _ = await self.chat("ocr", "ocr", messages, max_tokens=1024, temperature=0.0, cache=False, allow_fallback=False)
+        return text
 
     async def embed(self, texts: list[str], batch: int = 32) -> list[list[float]]:
         """Embeddings have their own quota. Cached per text, sent in batches, and a batch the service

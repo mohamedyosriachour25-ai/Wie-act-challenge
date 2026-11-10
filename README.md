@@ -25,7 +25,7 @@ npm run dev                   # http://localhost:5173, proxies /api and /ws to :
 npm run build                 # then the backend serves frontend/dist on :8000 by itself
 ```
 
-Tests: `cd backend && python -m pytest -q` (151 backend tests, including orchestration and translation coverage, run against a test-only fake HTTP transport -- see "Testing without a live key" below) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija).
+Tests: `cd backend && python -m pytest -q` (233 backend tests, including orchestration and translation coverage, run against a test-only fake HTTP transport -- see "Testing without a live key" below) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija). Browser suites live in `e2e/` (14 Playwright scripts: solo tutor, RAG, rooms, competition, leave-and-return persistence, languages, revision, games, camera, attention); see `e2e/README.md`. Their latest screenshots are in `e2e/shots/` (for example `04-explain-thales.png`, `comp-podium.png`, `persist-solo.png`).
 
 ### Testing without a live key
 
@@ -89,6 +89,46 @@ React (Vite)  <--REST + WebSocket-->  FastAPI  -->  AI gateway  -->  real infere
 
 An explanation costs three calls: `route` (compact) and `illustrate` (mid-size) run in parallel, then `explain` (compact) is written around the validated figure. If the illustration is unusable, a concept map is built from the key points and the explanation still gets a figure. The note "Why this figure" shows the learner the reasoning behind the picture.
 
+### Solo study spaces: the staged tutor
+
+Solo study is organised in **study spaces**: each learner can keep several (one per subject, say), each with **its own course material** and **its own conversation memory**. The tutor in a space always reads that space's material before answering, cites it like [1], and remembers the conversation (the last 6 messages verbatim plus a running summary of older ones, folded by one compact call in the background).
+
+The service answers each request whole (the guide rules out streaming), so a turn is split into stages and each one appears on screen the moment it finishes, over Server-Sent Events from our own server:
+
+| Stage | Class | What the learner sees |
+|---|---|---|
+| `intent` — what is wanted, rewritten as a standalone question using the conversation ("why?" → "why … in Thales theorem?") | compact | "Understanding your question", then "Understood as: …" |
+| retrieval in the space's material + a declared Wikipedia lookup in parallel (used only if the material does not cover it) | no AI call | the sources found |
+| `draft` — a short first answer (draft-then-revise) | compact | the text, within seconds, marked "quick draft" |
+| `tutor` — the final answer: corrects and completes the draft from the sources | mid-size | the final text replaces the draft |
+| `illustrate` — which figure and its parameters (started in parallel with the writing) | mid-size | the figure when it lands; a concept map from the answer's steps if no spec is usable |
+
+Greetings cost one compact call and no figure. Against a stand-in service with CPU-like delays, the first text appeared at 3.0 s and the final answer at 7.5 s, where the previous pipeline showed nothing for about 11 s. `HERWIEGO_QUICK_DRAFT=0` drops the draft (one call fewer, slower first text).
+
+**Wikipedia is a declared external source** (the guide allows one if clearly declared): keyless, openly licensed, linked on every answer that used it, switchable per message and globally (`HERWIEGO_WEB_SEARCH=0`). Only the rewritten question is sent; a message that looks like it contains personal details is refused before anything is sent anywhere.
+
+### How the tutor writes and draws
+
+The writers (compact draft, mid-size final) work from one **educator prompt**: work out what the student needs, extract the key concepts from the course material for this request, explain each more simply than the document (plain words, every term defined), show how they connect, give the complete set when the subject is a set (all the layers, all the stages), and use a practical example from the subject itself. They check every statement against the passages (the final writer does not trust the draft), never mix two models (OSI numbering inside TCP/IP), and never copy a title page, a source list or remarks about the figure. An explanation always has the same shape: title, short summary, **Key ideas** (numbered, each with its concept in bold), **How they connect**, **Example**, **Check yourself**. A cleanup pass removes anything a model still adds around it (JSON or code wrappers, "Sources:" lists, notes about figures).
+
+The **figure is drawn from the finished answer** (same items, names, order and count), with the document's analysed concepts and connections as vocabulary. If its spec is unusable, the figure validator recovers loose shapes (other key names, parameters at the top level, a template named loosely), a repair pass gets the exact parameter shapes, and as a last resort a concept map is built from the answer's key ideas or the document's concepts, so an explanation always ends with a figure. Hints are plain sentences, one per level (a guiding question, the key idea, the first step), never JSON.
+
+Each document is analysed once by the mid-size model: subject, summary, key concepts with a one-sentence plain explanation, and how they connect. Passages that look like a title page or table of contents are ranked down in search and skipped by the analysis.
+
+### RAG: retrieval in each library
+
+Vectors are stored in the app's own database (`HERWIEGO_VECTOR_BACKEND=local`, the default and the supported setup; Qdrant/Chroma adapters remain in `vectorstore.py` but are not used). Every library (each study space, each room) is kept apart. How a question finds its passages:
+
+- **Embeddings are spent once.** A content-hash cache means a passage is never embedded twice (re-uploads and shared material are free), and query embeddings are cached in memory.
+- **Hybrid ranking.** 0.8 × cosine + 0.2 × keyword relevance, where keyword relevance is half BM25 (normalised) and half term coverage, with English/French/Arabic stopwords removed. This keeps exact terms (a formula name, a date) from being lost by the embedding.
+- **Adaptive cut instead of one hand-tuned threshold.** A passage is kept only if its score is at least `max(HERWIEGO_MIN_SIMILARITY, 0.5 × best score)`, so weak tail passages drop out whatever the scale of the real embeddings. Neighbouring chunks of the same document are merged into one source.
+- **One-time document summary.** After a document is indexed, one compact call writes a short summary and key terms from passages sampled across the whole document (stored once, never repeated). The tutor's intent and writing steps receive this library overview, so they know what the material covers even when a question matches no single passage.
+- **Only what is cited goes to the mid-size model.** The compact draft cites passages; the mid-size final answer receives just those.
+
+Study rooms and the live-room notepad use the same staged tutor as Solo study: in a study room every member sees the same draft, answer and figure arrive together. The room's **"ask the room's material"** box uses it too (without a figure and without the web): the question is rewritten with the last two room answers as context, answered from the shared library with citations, and everyone sees the draft and the final answer arrive.
+
+When an answer has a figure, each numbered step that names a part of it (a segment such as `DE` or the triangle `ADE`, a stage of a process, a date on a timeline) becomes selectable: clicking it highlights that part of the figure. The matching is done by the server from the text, with no extra AI call.
+
 ### AI optimisation
 
 Two optimisations beyond the base orchestration:
@@ -113,17 +153,18 @@ The interface and the prompts work in English, French, Arabic (Modern Standard) 
 - Group rooms generate one explanation and one quiz for everyone, so a 10-person room costs the same as one person.
 - Error contract: quota exhausted, wait the stated delay and retry (or tell the user when the wait is too long); 503, retry once then fall back to the compact class; 400, halve `max_tokens` when the error names a ceiling; 200, read the quota headers.
 - The interface never freezes: staged loading messages, a live AI status chip, and an AI usage panel with the metrics the organisers also measure (calls per model, compact share, tokens, cache hits, quota waits, fallbacks).
-- With the fake service, the AI usage panel has buttons to exhaust the quota or make the large model busy, for a live resilience demo.
 
 ### Course material (retrieval)
 
-Learners add a PDF, `.txt`/`.md` file or pasted notes to their own library, and a group room has a shared library. Text is split into passages of about 800 characters and embedded in the background (batches under the endpoint's ceiling, progress shown, waits for the separate embeddings quota instead of failing). Search is cosine similarity over a local SQLite store.
+Learners add a PDF, `.txt`/`.md` file or pasted notes to their own library, and a group room has a shared library. Text is split into passages of about 800 characters and embedded in the background (batches under the endpoint's ceiling, progress shown, waits for the separate embeddings quota instead of failing). Search uses the hybrid ranking and adaptive cut described in "RAG" above.
+
+**PDFs are always accepted.** A PDF with a text layer is read directly (up to 20 MB, `HERWIEGO_MAX_PDF_MB`). Pages with no text layer (scans, photos of pages) or a text layer that decodes to garbage are rendered to images and read by the service's OCR model (`HERWIEGO_OCR_MODEL`, default `deepseek-ocr`, one call per page, up to `HERWIEGO_OCR_MAX_PAGES` = 40; blank pages are skipped). The document appears at once with "Reading scanned page i of n" and becomes searchable when done. If no page can be read (no OCR model, quota), the PDF is still kept as a file the learner can open. Check the OCR model with your key: `python scripts/check_ocr.py some-scan.pdf`.
 
 "Narrow before generating": passages below `HERWIEGO_MIN_SIMILARITY` are dropped. If none remain there is **no model call** and the user is told the material does not cover the question. If more than 3 remain, a compact call keeps the best ones. One compact call then writes the answer with `[n]` citations that open the source passage. Explanations use the same passages and say which documents they were built from. In a room one question produces one answer shown to everyone.
 
-You can also add **images** (PNG, JPG, WebP, GIF) as visual resources — a photo of the board, a scanned page, a diagram. They are shown in a gallery and opened full size, but they are kept out of retrieval: not indexed, not sent to the AI (no OCR), so they never spend quota. Up to 12 per library.
+You can also add **images** (PNG, JPG, WebP, GIF) as visual resources — a photo of the board, a scanned page, a diagram. They are shown in a gallery and opened full size, but they are kept out of retrieval: not indexed, not sent to the AI, so they never spend quota (put scanned pages in a PDF to have them read). Up to 12 per library.
 
-Safeguards: uploads that look like they contain e-mail addresses or phone numbers are refused (text is sent to the inference service); the material is passed to the model as data, never instructions; limits of 6 documents, 240 passages per document, 600 per library; room material needs room membership. If the platform's per-team vector collection turns out to be required, only `retrieve` and `index_document` in `materials.py` change.
+Safeguards: e-mail addresses, phone numbers and long identification numbers are removed from material before it is stored for search or sent to the inference service (the library says how many were removed; typed questions that contain them are still refused); the material is passed to the model as data, never instructions; limits of 6 documents, 240 passages per document, 600 per library; room material needs room membership.
 
 ### Illustrations
 
@@ -144,6 +185,44 @@ A public Live room runs an opt-in group game at each break. Because the Pomodoro
 ### Camera in Live rooms
 
 A Live room can turn into a shared camera wall. Turning your camera on is opt-in and off by default; you then see everyone else who is also sharing (it is reciprocal). The video is **peer to peer** over WebRTC: it never passes through the server, which only relays the small SDP/ICE signalling messages over the room's existing WebSocket, using the "perfect negotiation" pattern so two browsers can connect without clashing. The public space (presence + chat) holds up to `HERWIEGO_LIVE_CAPACITY` people (default 500), while `HERWIEGO_VIDEO_CAPACITY` (default 9) caps how many cameras share the mesh at once. This is a mesh, so it is meant for a handful of people; many publishers, or peers on different networks behind strict NATs, would need an SFU and a TURN server. The on-device focus signal is unchanged and still uses no camera.
+
+### Room competition
+
+Everyone in a study room can enter a competition on the room's topic. One mid-size call writes 8 questions grounded in the room's material (a compact call checks the answer keys when `HERWIEGO_QUIZ_VERIFY` is on), mixing five kinds:
+
+| Kind | Time | How it is scored |
+|---|---|---|
+| multiple choice | 20 s | right or wrong |
+| true or false | 12 s | right or wrong |
+| closest number | 30 s | full marks within the tolerance, then decreasing with the distance; the closest player gets +100 |
+| exercise (worked on paper, numeric result) | 60 s | as above |
+| short answer | 25 s | exact = full, close spelling = half |
+
+Points per question = closeness × (500 + 500 × speed), so right and fast earns up to 1000. The server keeps the time, hides the answer until everyone has replied or the time is up, then reveals it with each player's points; the game ends on a podium. Only the AI writing costs a call, and it is one call for the whole room. Results are saved (`competitions` table).
+
+### Scoring: productive work first
+
+Points reward steady work far more than play (`app/scoring.py`, rules shown in the app under "How points work"):
+
+- **Study time.** While a study page is open and the learner is active, the browser reports one minute at a time (at most one per 55 s, idle time is not counted). Solo study and a Live room's focus phase count fully; time in a study room counts at 0.6.
+- **Working day.** A day counts when effective minutes (focused minutes + 0.6 × room minutes + 2 per productive action) reach 25: +20 points, plus a working-day streak bonus of 5 per consecutive day (up to 10 days).
+- **Productive actions:** explanations, correct and perfect quizzes, revision cards, adding material, revision sheets.
+- **Social play pays less, with daily caps:** party games (1 point per 20 game points, cap 30), competitions (cap 40), shared quizzes (cap 40), time in rooms (cap 120).
+- **Weekly productivity index (0–100):** 50 × focused hours / 10 + 30 × working days / 5 + 20 × quiz accuracy, with a 7-day chart on Home.
+
+### Nothing generated is lost
+
+Generations run on the server, not in the page. In Solo study (and the live-room notepad) a tutor answer is a server task: leaving the page, switching tabs or losing the connection does not stop it. Its progress is written to the database as it goes (the draft, the final text, the figure), so coming back shows the answer where it is and the page reconnects to the rest (`GET /api/spaces/{id}/turn` replays it, then follows it). **Stop** stops it on the server and keeps what was produced. After a server restart an unfinished answer keeps its partial text, is marked as interrupted, and offers **Ask again**. One answer at a time per space.
+
+Study rooms work the same way: the explanation, the answers to questions about the material and the quiz are generated by the server, saved with the room (`rooms.state`) and come back after a restart; someone who leaves and comes back mid-generation sees the progress so far, then the rest. A room's material lives in the room's own library (`r:<code>`), a study space's in the space's library.
+
+### Voice
+
+A microphone button in the tutor and the room question box dictates the question with the browser's speech recognition (asked for consent the first time; on-device recognition is requested when the browser offers it, otherwise the browser's own service transcribes it — declared in the consent note). "Read aloud" reads a final answer with the browser's speech synthesis. No audio reaches HerwieGO's server.
+
+### On a phone
+
+The app can be added to a phone's home screen: `manifest.webmanifest` with 192/512 px icons, a maskable icon for Android and an `apple-touch-icon` for iOS.
 
 ## Deploy
 
@@ -193,8 +272,9 @@ Without Docker: `npm run build` in `frontend`, then `HERWIEGO_ENV=production HER
 - The "focused" signal is a boolean computed on the user's device (tab visibility, window focus, recent activity) and can be turned off.
 - Camera sharing in Live rooms is opt-in and off by default. The video is peer to peer and never reaches the server (only connection signalling does); nothing is recorded. The challenge brief discourages collecting faces, so camera sharing is a deliberate, user-initiated choice, not a default.
 - Only the learner's topic and question text is sent to the inference service.
+- Voice is off until the learner turns it on; dictation uses the browser's speech recognition and no audio is stored or sent to HerwieGO.
 - Anonymous chat messages never carry the author's pseudo, and do not count toward the participation bars.
 
 ## Not built yet
 
-Camera-based attention detection (planned fully on-device), internet retrieval from public sources, shared study stream, karaoke games, resume generator, voice read-aloud, teacher dashboard.
+Shared study stream, karaoke games, offline mode, and tuning the retrieval cut-off on the organisers' real embeddings (the adaptive cut is designed to need little tuning, but it has only been measured on the stand-in service).

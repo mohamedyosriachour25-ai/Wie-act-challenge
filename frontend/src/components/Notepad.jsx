@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { api } from "../lib/api.js";
 import { useAuth } from "../lib/auth.jsx";
 import { tx, useT } from "../lib/i18n.jsx";
-import { AskMaterial, MaterialsPanel } from "./Materials.jsx";
+import { MaterialsPanel } from "./Materials.jsx";
+import { SpaceTutor } from "./SpaceTutor.jsx";
 import { ErrorNote, RevisionSheet } from "./Study.jsx";
 
 const TABS = [
@@ -93,6 +94,25 @@ function MyRooms() {
   );
 }
 
+/** The staged tutor of the learner's first study space: the same conversation, memory and material as in Solo study. */
+function NotepadTutor() {
+  const t = useT();
+  const [space, setSpace] = useState(null);
+  const [web, setWeb] = useState({ on: true, available: true });
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    api("/api/spaces").then((d) => { setSpace(d.spaces.find((s) => s.primary) || d.spaces[0] || null); setWeb((w) => ({ ...w, available: d.web_search })); }).catch(setError);
+  }, []);
+  if (error) return <ErrorNote error={error} />;
+  if (!space) return <p className="muted small">{t("Loading…")}</p>;
+  return (
+    <>
+      <p className="muted small">{t("Your tutor from Solo study (“{name}”): same conversation, same material.", { name: space.name })}</p>
+      <SpaceTutor space={space} compact useWeb={web.on} setUseWeb={(on) => setWeb((w) => ({ ...w, on }))} webAvailable={web.available} />
+    </>
+  );
+}
+
 /** The live room's study notepad: everything needed to keep working without leaving the room. */
 export default function Notepad() {
   const t = useT();
@@ -110,8 +130,7 @@ export default function Notepad() {
       </div>
       {/* every tab stays mounted (hidden when inactive) so answers and notes survive switching tabs */}
       <div className="notepad-body" role="tabpanel" id="np-panel-ask" aria-labelledby="np-ask" hidden={tab !== "ask"}>
-        <p className="muted small">{t("Ask about your own course material. Answers cite the passages they come from.")}</p>
-        <AskMaterial scope="me" />
+        <NotepadTutor />
         <details className="np-materials"><summary className="small">{t("My course material")}</summary><MaterialsPanel scope="me" /></details>
       </div>
       <div className="notepad-body" role="tabpanel" id="np-panel-rooms" aria-labelledby="np-rooms" hidden={tab !== "rooms"}><MyRooms /></div>

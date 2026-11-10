@@ -28,7 +28,7 @@ import asyncio
 import re
 
 from . import prompts
-from .gateway import AIError, Gateway
+from .gateway import extract_json, AIError, Gateway
 from .visuals import concept_map_from_steps, describe_figure, sanitize_visual
 
 LEVELS = ("beginner", "intermediate", "advanced")
@@ -49,8 +49,10 @@ def _validate_route(obj: dict) -> dict:
 def _validate_figure(obj: dict) -> dict:
     if not isinstance(obj, dict):
         raise ValueError("bad figure")
-    # An unusable spec is not an error here: the caller falls back to a concept map built from the text.
-    return {"visual": sanitize_visual({"template": obj.get("template"), "params": obj.get("params")}), "rationale": str(obj.get("rationale", "")).strip()[:200]}
+    visual = sanitize_visual(obj)
+    if visual is None:   # unusable: let chat_json run its schema-aware repair once; after that the caller builds a figure itself
+        raise ValueError("bad figure")
+    return {"visual": visual, "rationale": str(obj.get("rationale", "")).strip()[:200]}
 
 
 def _validate_explanation(obj: dict) -> dict:
@@ -153,7 +155,25 @@ async def explain(gw: Gateway, topic: str, style: str = "balanced", level: str |
 async def hint(gw: Gateway, topic: str, question: str, level: int, lang: str = "en") -> dict:
     level = max(1, min(3, level))
     text, meta = await gw.chat("hint", "compact", prompts.hint_messages(clean_topic(topic), question[:300], level, prompts.norm_lang(lang)), max_tokens=120)
-    return {"level": level, "hint": text.strip(), "meta": _summarise([meta])}
+    return {"level": level, "hint": plain_text(text), "meta": _summarise([meta])}
+
+
+def plain_text(text: str) -> str:
+    """Small models sometimes answer a plain-text request in JSON or a code block: keep only the sentence meant
+    for the student (the hint/question/text field), never the raw structure."""
+    t = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", (text or "").strip())
+    obj = extract_json(t) if t[:1] in "{[" else None
+    if isinstance(obj, list) and obj:
+        obj = obj[0]
+    if isinstance(obj, dict):
+        for key in ("hint", "text", "question", "message", "content", "answer", "explanation"):
+            v = obj.get(key)
+            if isinstance(v, str) and len(v.strip()) > 3:
+                return v.strip()
+        strings = [v for v in obj.values() if isinstance(v, str) and len(v.split()) >= 3]
+        if strings:
+            return max(strings, key=len).strip()
+    return re.sub(r"^(hint|indice|تلميح)\s*\d*\s*[:.-]\s*", "", t, flags=re.I).strip()
 
 
 async def get_quiz(gw: Gateway, topic: str, level: str = "beginner", lang: str = "en") -> tuple[list[dict], dict]:

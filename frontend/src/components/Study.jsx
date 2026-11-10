@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
-import { tx, useLang, useT } from "../lib/i18n.jsx";
+import { LANGS, tx, useLang, useT } from "../lib/i18n.jsx";
 import { StageLoader } from "./Common.jsx";
 import VisualSheet from "../visuals/VisualSheet.jsx";
 
@@ -221,19 +221,56 @@ const RULE_LABEL = {
   signup: tx("Welcome bonus"), daily_login: tx("Daily visit"), streak: tx("Day streak bonus"),
   explain: tx("Explanation studied"), quiz_correct: tx("Correct quiz answer"), quiz_perfect: tx("Perfect quiz"),
   group_quiz: tx("Correct answer in a study room"), resume: tx("Revision sheet"), review_card: tx("Flashcard reviewed"),
-  game: tx("Break game"), pocket_tree: tx("Pocket tree grown"),
+  game: tx("Break game"), pocket_tree: tx("Pocket tree grown"), study_time: tx("Focused study minute"),
+  material: tx("Course material added"), work_day: tx("Working day reached"), work_streak: tx("Working-day streak"),
+  group_time: tx("Study minutes with friends"), competition: tx("Room competition"),
 };
+const KIND_LABEL = { productive: tx("Productive work"), rhythm: tx("Working days"), social: tx("Social play") };
 
-/** The account score (GET /api/score/me): level, progress to the next one, rank, latest points, and the leaderboard. */
+const hm = (t, minutes) => (minutes >= 60 ? t("{h} h {m} min", { h: Math.floor(minutes / 60), m: minutes % 60 }) : t("{m} min", { m: minutes }));
+
+/** Last 7 days: focused minutes (solid) and minutes with friends (light), a dot on working days. */
+function WeekBars({ days }) {
+  const t = useT();
+  const { lang } = useLang();
+  const html = LANGS.find((l) => l.code === lang)?.html || "en";
+  const fmt = new Intl.DateTimeFormat(html, { weekday: "short", timeZone: "UTC" });
+  const top = Math.max(60, ...days.map((d) => d.focused + d.group));
+  return (
+    <div className="week-bars" role="img" aria-label={t("Study minutes over the last 7 days")}>
+      {days.map((d) => (
+        <div key={d.day} className="wb-col" title={`${hm(t, d.focused)} · ${t("with friends")}: ${hm(t, d.group)}`}>
+          <div className="wb-bar">
+            <i className="g" style={{ height: `${(d.group / top) * 100}%` }} />
+            <i className="f" style={{ height: `${(d.focused / top) * 100}%` }} />
+          </div>
+          <span className={`wb-day${d.work_day ? " work" : ""}`}>{fmt.format(new Date(d.day * 86400000))}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The account score (GET /api/score/me), scoring v2: productivity, working days and their streak, then social play. */
 export function ScorePanel({ refreshKey }) {
   const t = useT();
   const [s, setS] = useState(null);
+  const [rules, setRules] = useState(null);
   const [period, setPeriod] = useState("week");
   const [board, setBoard] = useState(null);
-  useEffect(() => { api("/api/score/me").then(setS).catch(() => {}); }, [refreshKey]);
+  useEffect(() => {
+    const load = () => api("/api/score/me").then(setS).catch(() => {});
+    load();
+    const id = setInterval(load, 120_000);      // minutes keep adding up while the page is open
+    return () => clearInterval(id);
+  }, [refreshKey]);
   useEffect(() => { api(`/api/score/leaderboard?period=${period}`).then(setBoard).catch(() => {}); }, [period, refreshKey]);
   if (!s) return null;
   const label = (rule) => t(RULE_LABEL[rule] || rule);
+  const d = s.today;   // {focused, group, effective, goal, work_day}
+  const pts = s.week?.points_by_kind || { productive: 0, rhythm: 0, social: 0 };
+  const sum = Math.max(1, pts.productive + pts.rhythm + pts.social);
+  const goalPct = d ? Math.min(100, Math.round((d.effective / d.goal) * 100)) : 0;
   return (
     <section className="panel score-panel">
       <div className="score-head">
@@ -248,7 +285,51 @@ export function ScorePanel({ refreshKey }) {
         <i style={{ width: `${Math.round(s.progress * 100)}%` }} />
       </div>
       <p className="muted small">{s.next ? t("{n} points to the next level", { n: s.next - s.total }) : t("Top level")}
-        {" · "}{t("+{n} today", { n: s.today })}</p>
+        {" · "}{t("+{n} today", { n: s.today_points })}</p>
+
+      {d && (
+        <div className="workday">
+          <div className="wd-head">
+            <strong>{t("Today")}</strong>
+            <span className="small">{d.work_day ? t("Working day reached") : t("{n} min to a working day", { n: Math.max(0, d.goal - d.effective) })}</span>
+          </div>
+          <div className={`meter wd-meter${d.work_day ? " done" : ""}`}><i style={{ width: `${goalPct}%` }} /></div>
+          <p className="muted small">{t("Focused")}: {hm(t, d.focused)}{d.group ? ` · ${t("with friends")}: ${hm(t, d.group)}` : ""}</p>
+          <p className="streak-line">{s.work_streak > 0 ? t("{n} working days in a row", { n: s.work_streak }) : t("Reach a working day to start a streak")}</p>
+        </div>
+      )}
+      {s.days && <WeekBars days={s.days} />}
+      {s.week && (
+        <>
+          <p className="small week-line">
+            {t("This week")}: <b>{hm(t, s.week.focused)}</b> {t("focused")} · <b>{s.week.work_days}</b> {t("working days")} ·{" "}
+            {t("productivity")} <b>{s.week.productivity}</b>/100
+          </p>
+          <div className="kind-bar" role="img" aria-label={t("Points this week by kind")}>
+            {["productive", "rhythm", "social"].map((k) => <i key={k} className={k} style={{ width: `${(pts[k] / sum) * 100}%` }} />)}
+          </div>
+          <ul className="kind-legend small">
+            {["productive", "rhythm", "social"].map((k) => <li key={k}><span className={`sw ${k}`} />{t(KIND_LABEL[k])} {pts[k]}</li>)}
+          </ul>
+        </>
+      )}
+      <details className="how-points" onToggle={(e) => { if (e.target.open && !rules) api("/api/score/rules").then(setRules).catch(() => {}); }}>
+        <summary className="small">{t("How points work")}</summary>
+        <p className="small">{t("A working day is {n} effective minutes: focused minutes, plus 0.6 per minute with friends, plus 2 per productive action. Each working day gives 20 points and grows your streak (5 points per day in a row, up to 10).", { n: rules?.work_day_minutes ?? 25 })}</p>
+        {rules && (
+          <table className="rules-table small">
+            <tbody>
+              {rules.rules.map((r) => (
+                <tr key={r.rule} className={r.kind}>
+                  <td>{label(r.rule)}</td>
+                  <td>+{r.rule === "group_time" ? "0.6" : r.points}</td>
+                  <td className="muted">{r.daily_cap ? t("max {n}/day", { n: r.daily_cap }) : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </details>
       {s.recent.length > 0 && (
         <ul className="score-recent">
           {s.recent.slice(0, 5).map((r, i) => <li key={i}><span>{label(r.rule)}</span><b>+{r.points}</b></li>)}

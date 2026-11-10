@@ -40,11 +40,11 @@ GAMES = ["trivia_race", "mime", "pictionary"]
 LIVE = ["LIVE-DEEP", "LIVE-DEMO"]
 
 # How often each kind of tester shows up and how much they do on an active day.
-PROFILES = {
-    "assidu":     {"p_day": 0.8, "actions": (4, 9)},
-    "regulier":   {"p_day": 0.5, "actions": (2, 6)},
-    "occasionnel": {"p_day": 0.25, "actions": (1, 4)},
-    "rare":       {"p_day": 0.08, "actions": (1, 2)},
+PROFILES = {   # actions per active day, and focused study minutes per active day (scoring v2 heartbeats)
+    "assidu":     {"p_day": 0.8, "actions": (4, 9), "minutes": (35, 110)},
+    "regulier":   {"p_day": 0.5, "actions": (2, 6), "minutes": (15, 60)},
+    "occasionnel": {"p_day": 0.25, "actions": (1, 4), "minutes": (5, 30)},
+    "rare":       {"p_day": 0.08, "actions": (1, 2), "minutes": (0, 15)},
 }
 
 
@@ -97,6 +97,16 @@ def simulate(db: DB, uid: int, profile: str, start: float, end: float, rng: rand
         if day > start:
             scoring.track(db, uid, "login", ts=t)
             scoring.seen(db, uid, t, login=True)
+        # a block of focused minutes (solo or a live room's focus), sometimes a session with friends
+        scoring._last_beat.pop(uid, None)
+        context = rng.choices(["solo", "live"], weights=[70, 30])[0]
+        for _ in range(rng.randint(*prof["minutes"])):
+            t += 60
+            scoring.heartbeat(db, uid, context, t)
+        if rng.random() < 0.3:
+            for _ in range(rng.randint(10, 45)):
+                t += 60
+                scoring.heartbeat(db, uid, "room", t)
         for _ in range(rng.randint(*prof["actions"])):
             t += rng.uniform(3, 25) * 60
             if t >= end:
@@ -130,7 +140,7 @@ def simulate(db: DB, uid: int, profile: str, start: float, end: float, rng: rand
             elif what == "game":
                 game = rng.choice(GAMES)
                 pts = rng.choice([0, 40, 110, 150, 260, 300, 420])
-                scoring.award(db, uid, "game", units=pts // 10, ref=game, ts=t)
+                scoring.award(db, uid, "game", units=pts // 20, ref=game, ts=t)
             elif what == "tree":
                 state = "grown" if rng.random() < skill else "wilted"
                 scoring.track(db, uid, "pocket_tree", {"room": rng.choice(LIVE), "state": state}, ts=t)
@@ -196,7 +206,10 @@ def cmd_report(a) -> None:
             raise SystemExit(f"No user {a.user!r}.")
         s = scoring.summary(db, u["id"])
         print(f"{u['pseudo']}: {s['total']} pts, level {s['level']} ({s['progress']:.0%} to next), rank #{s['rank']},"
-              f" streak {s['streak_days']} d, {u['login_count']} logins, last seen {_when(u['last_seen'])}")
+              f" working-day streak {s['work_streak']} d, {u['login_count']} logins, last seen {_when(u['last_seen'])}")
+        w = s["week"]
+        print(f"This week: {w['focused']} min focused, {w['group']} min with friends, {w['work_days']} working days,"
+              f" productivity {w['productivity']}/100, points {w['points_by_kind']}")
         print("\nPoints by rule:")
         for r in s["by_rule"]:
             print(f"  {r['rule']:<14} {r['points']:>6}  ({r['times']}x)  {r['label']}")
@@ -209,10 +222,10 @@ def cmd_report(a) -> None:
         " (SELECT COUNT(*) FROM activity a WHERE a.user_id=u.id) AS actions,"
         " (SELECT COALESCE(SUM(points),0) FROM points p WHERE p.user_id=u.id) AS score"
         " FROM users u ORDER BY score DESC, u.pseudo")
-    print(f"{'#':>3}  {'pseudo':<20} {'score':>6} {'lvl':>3} {'streak':>6} {'logins':>6} {'actions':>7}  {'created':<16}  last seen")
+    print(f"{'#':>3}  {'pseudo':<20} {'score':>6} {'lvl':>3} {'wstreak':>7} {'logins':>6} {'actions':>7}  {'created':<16}  last seen")
     for i, r in enumerate(rows, 1):
         lvl = scoring.level_of(r["score"])["level"]
-        print(f"{i:>3}  {r['pseudo']:<20} {r['score']:>6} {lvl:>3} {scoring.streak_days(db, r['id']):>6} {r['login_count']:>6}"
+        print(f"{i:>3}  {r['pseudo']:<20} {r['score']:>6} {lvl:>3} {scoring.work_streak(db, r['id']):>7} {r['login_count']:>6}"
               f" {r['actions']:>7}  {_when(r['created_at']):<16}  {_when(r['last_seen'])}")
     print(f"\n{len(rows)} users · {db.one('SELECT COUNT(*) AS n FROM activity')['n']} tracked actions"
           f" · {db.one('SELECT COALESCE(SUM(points),0) AS n FROM points')['n']} points given")

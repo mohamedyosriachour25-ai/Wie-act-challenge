@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
+import { useStudyClock } from "../lib/studyclock.js";
 import { tx, useT } from "../lib/i18n.jsx";
 
 const GRADES = [["again", tx("Again")], ["hard", tx("Hard")], ["good", tx("Good")], ["easy", tx("Easy")]];
 
 export default function Review() {
   const t = useT();
+  useStudyClock("solo");          // revising flashcards is focused study
   const [cards, setCards] = useState(null);
   const [i, setI] = useState(0);
   const [flipped, setFlipped] = useState(false);

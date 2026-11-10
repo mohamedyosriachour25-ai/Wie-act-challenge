@@ -1,6 +1,6 @@
 # HerwieGO — Development Roadmap
 
-Ordered by the actual project state and the owner's stated priorities. **Preserve existing code; extend, don't rewrite.** Every phase ends with the green gate: `pytest -q` (125+), `npm run i18n:check`, `npm run build`, and the relevant Playwright suite.
+Ordered by the actual project state and the owner's stated priorities. **Preserve existing code; extend, don't rewrite.** Every phase ends with the green gate: `pytest -q` (233+), `npm run i18n:check`, `npm run build`, and the relevant Playwright suite.
 
 ## Phase 1 — Stabilise against the real AI service (CRITICAL)
 Nothing here changes architecture; it validates the biggest unknown. Note (9 Nov 2026): the built-in

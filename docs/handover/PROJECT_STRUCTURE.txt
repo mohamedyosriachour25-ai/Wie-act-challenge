@@ -1,5 +1,5 @@
 HerwieGO — project directory tree (annotated)
-Generated 2026-11-08 from the actual repository.
+Generated 2026-11-08 from the actual repository; updated 2026-11-10 for Lots 13-15.
 Excluded from this tree: backend/venv, frontend/node_modules, frontend/dist (build output),
 __pycache__, .pytest_cache, *.db, .git. Those are generated or secret and are not committed.
 
@@ -12,7 +12,7 @@ herwiego/
 ├── .github/workflows/ci.yml      CI: pytest (py3.12/3.13) + i18n:check + vite build + docker build & healthcheck
 │
 ├── backend/                      FastAPI application (Python)
-│   ├── requirements.txt          fastapi, uvicorn[standard], httpx, websockets, pypdf
+│   ├── requirements.txt          fastapi, uvicorn[standard], httpx, websockets, pypdf, pypdfium2, pillow
 │   ├── requirements-dev.txt      -r requirements.txt + pytest
 │   ├── pytest.ini                pytest config
 │   ├── .env.example              Backend env template (copy to backend/.env for local non-docker runs)
@@ -35,9 +35,16 @@ herwiego/
 │   │   ├── routes_study.py       Solo study endpoints: diagnostic, explain, hint, quiz(+answer/finish), resume,
 │   │   │                         progress, ai/status, ai/metrics. log_event() writes to `events`.
 │   │   ├── materials.py          RAG: upload (raw body + X-Filename), background indexing, chunking, embeddings,
-│   │   │                         similarity search, /raw blob serving, /ask (grounded answer). Images stored as blobs.
+│   │   │                         hybrid search (cosine + BM25/coverage, stopwords), one-time document summaries
+│   │   │                         (summarise_document, library_overview), /raw blob serving, /ask. Images stored as blobs.
 │   │   ├── review.py             Spaced repetition (SM-2). /api/review add_quiz, due, grade, stats. schedule().
-│   │   ├── scoring.py            User tracking (activity) + score ledger (points): RULES, award(), seen(), levels, /api/score.
+│   │   ├── scoring.py            Scoring v2: activity + points ledger, study_time minutes (heartbeat), working days +
+│   │   │                         streak, productive/rhythm/social rules with caps, week report, /api/score(+/heartbeat).
+│   │   ├── competition.py        Room competition: 8 grounded questions (mcq/truefalse/numeric/exercise/short), server
+│   │   │                         clock, closeness × speed points, reveal, podium, saved to `competitions`.
+│   │   ├── spaces.py             Study spaces (/api/spaces): per-space material, tutor turns as server tasks (saved as they
+│   │   │                         progress, reconnect/stop endpoints, restart recovery), memory folding.
+│   │   ├── vectors.py            RAG vector index. Default and supported: local (vectors in the app DB); dormant Qdrant/Chroma adapters.
 │   │   ├── rooms.py              Group rooms + Live rooms. REST (list/create/get/conversation) + WebSocket /ws/rooms/{code}.
 │   │   │                         Hub (in-memory room registry), Room, Member, presence, chat, DM, WebRTC relay,
 │   │   │                         pomodoro timer, break games (trivia/mime/pictionary), summaries.
@@ -51,12 +58,16 @@ herwiego/
 │   │       ├── pipeline.py       Study steps and which model class runs each: explain, hint, get_quiz, ask_material,
 │   │       │                     summarise_session, revision_sheet, public_quiz. Schema validation of model JSON.
 │   │       ├── prompts.py        System/user prompt builders + JSON schemas + few-shot examples per task.
+│   │       ├── tutor.py          Staged turn (spaces, rooms, room Q&A): intent → sources (adaptive cut) → draft → final →
+│       │                     figure, + step_focus (numbered step → figure part).
+│   │       ├── web.py            Declared Wikipedia lookup (keyless, cached, 3.5 s timeout, never raises).
 │   │       └── visuals.py        Validation/normalisation of illustration specs the model returns. 6 templates:
 │   │                             thales, function_plot, process_flow, timeline, comparison, concept_map (last resort).
 │   │                             No mock_api.py/mock_llm.py anymore -- deleted 9-10 Nov: the app has no built-in
 │   │                             fake service and no fallback (see claude/herwiego-app-status.md).
+│   ├── scripts/check_ocr.py      One-page OCR check of a scanned PDF with the real key (one call)
 │   ├── scripts/test_db.py        Test database: fake users (unique pseudos, generated passwords → test-users.csv), activity + scores
-│   └── tests/                    pytest suite (187 tests total)
+│   └── tests/                    pytest suite (233 tests in 21 files)
 │       ├── _fake_service.py      TEST-ONLY fake httpx transport (quota/saturation/ceiling contract + synthetic
 │       │                         task replies). Not imported by backend/app; create_app(ai_transport=...) is the
 │       │                         injection point. Replaces the old mock_api.py/mock_llm.py for test purposes.
@@ -71,7 +82,14 @@ herwiego/
 │       ├── test_phonetree.py     Pocket tree: link token, grow/wither state machine, WS flow, forest log/alert
 │       ├── test_draw.py          Pictionary drawing relay (performer-only, late-watcher sync, clamping) + game opt-out
 │       ├── test_review.py        SM-2 scheduling + endpoints
-│       ├── test_scoring.py       Score caps, visits + streaks, levels/ranks, /api/score, the test-DB script
+│       ├── test_answer_quality.py Real-model failures: JSON hints, padded lessons, loose figure specs, title pages, figure from answer
+│       ├── test_persistence.py   Generations survive leaving the page and restarts (spaces + rooms)
+│       ├── test_pdf_material.py  PDFs: text layer, scanned → OCR, redaction, fallback to an openable file, size caps
+│       ├── test_scoring.py       Scoring v2: minutes, heartbeat throttle, working days + streak, caps, week report, test-DB script
+│       ├── test_competition.py   Competition scoring/closeness, a full two-player WS game, step→figure links
+│       ├── test_games.py         Break-game word/trivia generation and guess judging
+│       ├── test_spaces.py        Spaces privacy, staged turn order, per-space material, memory + follow-ups, web lookup
+│       ├── test_rag_index.py     Team collection (Qdrant/Chroma stand-ins), outage fallback + resync, embedding cache, hybrid, merge
 │       ├── test_hardening.py     Rate limits, auth edge cases, startup refusals (missing key, weak prod secret)
 │       └── test_i18n.py          Every server string translated FR/AR/Darija
 │
@@ -82,6 +100,7 @@ herwiego/
 │   ├── scripts/i18n-check.mjs    Fails the build if any UI sentence is missing OR unused in FR/AR/Darija
 │   ├── scripts/attention-test.mjs  Unit tests for the pure attention-tracker logic (npm run attention:test; runs in CI)
 │   ├── scripts/qr-test.mjs         Unit tests for the QR generator; decodes the output with jsQR (npm run qr:test; runs in CI)
+│   ├── public/                   favicon.svg, PWA icons (apple-touch-icon 180, icon-192/512, maskable 512), manifest.webmanifest
 │   ├── public/models/            Self-hosted face models (BlazeFace + FaceMesh, ~2 MB, MIT) for the opt-in attention check
 │   └── src/
 │       ├── main.jsx              React root
@@ -92,10 +111,12 @@ herwiego/
 │       │   ├── auth.jsx          Auth context (token in localStorage), useAuth()
 │       │   ├── hooks.js          useRoomSocket, useCycle (pomodoro), useVideoMesh (WebRTC), useAIStatus, useFocusSignal, useAttention
 │       │   ├── qr.js             QR boolean matrix + SVG path (qrcode-generator)
+│       │   ├── studyclock.js     useStudyClock(context): one heartbeat per active minute (solo / live focus / room)
+│       │   ├── voice.js          Web Speech API wrappers: dictation (consent, on-device when offered) + read-aloud
 │       │   ├── attention.js      Camera attention: pure tracker (createTracker/classify) + lazy on-device face-model loader
 │       │   └── i18n.jsx          t()/tx()/tr() + language context; loads locale dicts
 │       ├── locales/              fr.js, ar.js, darija.js (English-key → translation dictionaries)
-│       ├── components/           AIStatus.jsx, Logo.jsx (HerwieGO mark: H + rising arrow + graduation cap; also public/favicon.svg), Backdrop.jsx (interactive canvas background), RoomForest.jsx (room forest: pocket trees + one QR + copy invite), Notepad.jsx (live-room study notepad), Common.jsx (TimerRing, Dots…), Materials.jsx, QrCode.jsx (inline-SVG QR), Tree.jsx (SVG tree), DrawBoard.jsx (pictionary canvas), Study.jsx (Explanation, HintLadder, SoloQuiz, ProgressPanel…)
+│       ├── components/           AIStatus.jsx, Logo.jsx (HerwieGO mark: H + rising arrow + graduation cap; also public/favicon.svg), Backdrop.jsx (interactive canvas background), RoomForest.jsx (room forest: pocket trees + one QR + copy invite), Notepad.jsx (live-room study notepad), Common.jsx (TimerRing, Dots…), Materials.jsx, QrCode.jsx (inline-SVG QR), Tree.jsx (SVG tree), DrawBoard.jsx (pictionary canvas), Study.jsx (Explanation, HintLadder, SoloQuiz, ProgressPanel…), Tutor.jsx (safe Markdown renderer, Sources, StageTrail, Answer for the staged tutor), SpaceTutor.jsx (one study space's staged tutor; used by Solo study and, compact, by the live-room notepad), Competition.jsx (room competition: question card, reveal, podium), Voice.jsx (MicButton with consent, ReadAloud)
 │       ├── pages/                Home, Study (solo tutor), Rooms (lobby), Room (study room), Live (lobby), Live→LiveRoom (camera wall + forest + notepad), Review, PhoneTree (standalone /tree/:token page)
 │       └── visuals/              Illustration renderers: Thales, FunctionPlot, ProcessFlow, Timeline, Comparison,
 │                                  ConceptMap + VisualSheet (dispatcher) + util.js
@@ -109,6 +130,8 @@ herwiego/
 │   ├── lang.py                   Language switch + RTL
 │   ├── review.py                 Spaced-repetition flashcards
 │   ├── resume.py                 Revision-sheet button
+│   ├── competition.py            Two-player room competition to the podium
+│   ├── persistence.py            Leave Solo study / a study room mid-generation, come back: still there
 │   ├── draw.py                   Pictionary drawing board: performer draws, watcher sees it live, Clear empties both (~2 min)
 │   ├── attention.py              Opt-in camera attention check (fake camera + synthetic face); _synth_face.py builds the clip
 │   ├── _shot.py                  Screenshot helper
