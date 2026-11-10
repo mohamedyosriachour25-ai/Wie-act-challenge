@@ -13,10 +13,9 @@ function Stat({ label, value, hint }) {
   );
 }
 
-function MetricsPanel({ mock }) {
+function MetricsPanel() {
   const t = useT();
   const [m, setM] = useState(null);
-  const [busy, setBusy] = useState("");
   useEffect(() => {
     let alive = true;
     const load = () => api("/api/ai/metrics").then((d) => alive && setM(d)).catch(() => {});
@@ -27,10 +26,6 @@ function MetricsPanel({ mock }) {
       clearInterval(id);
     };
   }, []);
-  const simulate = async (mode) => {
-    setBusy(mode);
-    try { await api("/api/ai/simulate", { method: "POST", body: { mode } }); } finally { setBusy(""); }
-  };
   if (!m) return <p className="muted small">{t("Loading usage…")}</p>;
   const share = m.compact_share == null ? t("none yet") : t("{n}% compact", { n: Math.round(m.compact_share * 100) });
   return (
@@ -45,16 +40,6 @@ function MetricsPanel({ mock }) {
         <Stat label={t("Quota waits")} value={`${m.quota_handled}/${m.quota_refusals}`} hint={t("Refusals handled by waiting, out of all refusals")} />
         <Stat label={t("Fallbacks")} value={m.fallbacks} hint={t("Mid-size step answered by the compact model")} />
       </dl>
-      {mock && (
-        <div className="demo-box">
-          <p className="small"><strong>{t("Resilience demo.")}</strong> {t("The built-in demo service can run out of quota or get busy, so you can watch the app cope.")}</p>
-          <div className="row wrap">
-            <button className="btn small" disabled={!!busy} onClick={() => simulate("quota")}>{t("Exhaust the quota for 8 s")}</button>
-            <button className="btn small" disabled={!!busy} onClick={() => simulate("saturate")}>{t("Make the large model busy")}</button>
-            <button className="btn small ghost" disabled={!!busy} onClick={() => simulate("clear")}>{t("Back to normal")}</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -72,7 +57,7 @@ export default function AIStatus() {
   }, [open]);
   if (!status) return null;
 
-  let label = status.mock ? t("Demo AI ready") : t("AI ready");
+  let label = t("AI ready");
   let tone = "ok";
   if (status.state === "working") { label = t("AI is working"); tone = "busy"; }
   if (status.state === "queued") { label = status.retry_in ? t("AI queued, {n} s", { n: status.retry_in }) : t("AI queued"); tone = "wait"; }
@@ -87,7 +72,7 @@ export default function AIStatus() {
         <div id="ai-panel" className="popover" role="region" aria-label={t("AI usage")}>
           <h3>{t("AI usage")}</h3>
           {status.state === "queued" && <p className="small">{statusText(t, status)}</p>}
-          <MetricsPanel mock={status.mock} />
+          <MetricsPanel />
         </div>
       )}
       {(status.state === "queued" || status.notice) && (

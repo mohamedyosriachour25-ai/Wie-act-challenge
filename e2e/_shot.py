@@ -6,7 +6,7 @@ with sync_playwright() as p:
     pg=br.new_context(viewport={"width":1280,"height":1000}).new_page()
     pg.goto(BASE+"/study")
     pg.get_by_label("Pseudo").fill(f"ui{random.randint(1000,9999)}"); pg.get_by_label("Password").fill("secret1"); pg.get_by_role("button",name="Create account").click()
-    pg.wait_for_selector(".diag"); pg.get_by_role("button",name="Skip for now").click()
+    pg.wait_for_selector(".welcome")
     pg.wait_for_selector(".welcome")
     pg.screenshot(path=f"{S}/ui-welcome.png")
     pg.get_by_label("What do you want to understand?").fill("Thales theorem"); pg.get_by_role("button",name="Explain it").click()

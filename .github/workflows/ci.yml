@@ -43,9 +43,9 @@ jobs:
     needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t ednova:ci .
+      - run: docker build -t herwiego:ci .
       - name: container starts and reports healthy
         run: |
-          docker run -d --name ednova -p 8000:8000 -e EDNOVA_SECRET=$(openssl rand -hex 32) ednova:ci
+          docker run -d --name herwiego -p 8000:8000 -e HERWIEGO_SECRET=$(openssl rand -hex 32) herwiego:ci
           for i in $(seq 1 20); do curl -fs http://127.0.0.1:8000/api/health && exit 0; sleep 1; done
-          docker logs ednova; exit 1
+          docker logs herwiego; exit 1

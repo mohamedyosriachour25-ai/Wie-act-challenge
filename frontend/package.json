@@ -1,5 +1,5 @@
 {
-  "name": "ednova-frontend",
+  "name": "herwiego-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -12,8 +12,8 @@
     "qr:test": "node scripts/qr-test.mjs"
   },
   "dependencies": {
-    "@fontsource/atkinson-hyperlegible": "^5.0.0",
-    "@fontsource/familjen-grotesk": "^5.0.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
     "@fontsource/noto-kufi-arabic": "^5.3.0",
     "@fontsource/noto-naskh-arabic": "^5.3.0",
     "@vladmandic/human": "^3.3.6",

@@ -1,4 +1,4 @@
-const TOKEN_KEY = "ednova.token";
+const TOKEN_KEY = "herwiego.token";
 
 export const getToken = () => {
   try {
@@ -36,7 +36,7 @@ export async function api(path, { method = "GET", body } = {}) {
   try {
     res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch {
-    throw new ApiError("Cannot reach the EdNova server. Check that the backend is running.", 0);
+    throw new ApiError("Cannot reach the HerwieGO server. Check that the backend is running.", 0);
   }
   let data = null;
   try {
@@ -56,6 +56,12 @@ export const wsUrl = (code) => {
   return `${proto}://${location.host}/ws/rooms/${encodeURIComponent(code)}?token=${encodeURIComponent(getToken())}&lang=${currentLang}`;
 };
 
+/** The pocket-tree space needs no login: the token alone (minted for a room by /api/rooms/{code}/phone-tree) identifies it. */
+export const phoneTreeWsUrl = (token) => {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws/phone-tree/${encodeURIComponent(token)}?lang=${currentLang}`;
+};
+
 /** URL of an uploaded image resource, authenticated by a token in the query string (an <img> cannot send headers). */
 export function materialRawUrl(id, scope = "me") {
   return `/api/materials/${id}/raw?scope=${encodeURIComponent(scope)}&token=${encodeURIComponent(getToken())}`;
@@ -70,7 +76,7 @@ export async function uploadMaterial(scope, body, filename, title = "") {
   try {
     res = await fetch(`/api/materials/file?scope=${encodeURIComponent(scope)}&title=${encodeURIComponent(title)}`, { method: "POST", headers, body });
   } catch {
-    throw new ApiError("Cannot reach the EdNova server. Check that the backend is running.", 0);
+    throw new ApiError("Cannot reach the HerwieGO server. Check that the backend is running.", 0);
   }
   let data = null;
   try {

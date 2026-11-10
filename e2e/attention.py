@@ -8,8 +8,8 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 import _synth_face
 
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 ARGS = ["--no-sandbox", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
 problems = []
 
@@ -35,7 +35,7 @@ navigator.mediaDevices.getUserMedia = async (c) => { window.__gum.calls++; const
 LIVE_TRACKS = "window.__gum.tracks.filter(t => t.readyState === 'live').length"
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=ARGS)
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=ARGS)
     ctx = br.new_context(viewport={"width": 1100, "height": 1000}, permissions=["camera"])
     ctx.add_init_script(INIT)
     pg = ctx.new_page()
@@ -78,7 +78,7 @@ with sync_playwright() as p:
         check("no face for a while -> 'away' status", got_away, pg.locator(".attention-status").inner_text() if pg.locator(".attention-status").count() else "")
         check("status is styled as away", pg.locator(".attention-status.away").count() == 1)
         check("my presence pip turns off (the boolean reached the room)",
-              poll(pg, f"[...document.querySelectorAll('.chips-people li')].some(li => li.textContent.includes('{pseudo}') && li.querySelector('.pip.off'))", 30000))
+              poll(pg, "!!document.querySelector('.stage-grid > figure:first-child figcaption .pip.off')", 30000))
         pg.screenshot(path=f"{SHOTS}/attention-away.png")
 
         # 4. privacy: only this app's own origin was contacted, and no image/video was posted anywhere
@@ -110,7 +110,7 @@ with sync_playwright() as p:
     # 7. a face in view -> 'facing the screen' and the learner stays shown as focused (synthetic cartoon face)
     clip = os.path.join(tempfile.mkdtemp(), "face.y4m")
     if in_focus and _synth_face.make(clip):
-        br2 = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=ARGS + [f"--use-file-for-fake-video-capture={clip}"])
+        br2 = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=ARGS + [f"--use-file-for-fake-video-capture={clip}"])
         c2 = br2.new_context(viewport={"width": 1100, "height": 1000}, permissions=["camera"]); q = c2.new_page()
         q.on("pageerror", lambda e: problems.append(f"pageerror (face): {e}"))
         who = f"face{random.randint(1000, 9999)}"
@@ -120,7 +120,7 @@ with sync_playwright() as p:
         q.get_by_label("Also use my camera to check that I am facing the screen").check()
         check("face in view -> 'You are facing the screen.'", poll(q, "document.querySelector('.attention-status')?.textContent.includes('facing the screen')", 60000))
         check("status is not styled as away", q.locator(".attention-status.away").count() == 0)
-        check("my presence pip is on", poll(q, f"[...document.querySelectorAll('.chips-people li')].some(li => li.textContent.includes('{who}') && li.querySelector('.pip.on'))", 15000))
+        check("my presence pip is on", poll(q, "!!document.querySelector('.stage-grid > figure:first-child figcaption .pip.on')", 15000))
         q.screenshot(path=f"{SHOTS}/attention-facing.png")
         br2.close()
     else:

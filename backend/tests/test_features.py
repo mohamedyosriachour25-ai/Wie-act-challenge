@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.config import load_settings
 from app.main import create_app
 
+from ._fake_service import build_fake, fake_ai_settings
 from .test_app import auth, recv_until, signup
 
 PNG = bytes.fromhex(
@@ -18,7 +19,8 @@ NOTES = ("Photosynthesis happens in the chloroplasts of a plant cell. Chlorophyl
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    transport, _ = build_fake()
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=transport)
     with TestClient(app) as c:
         yield c
 
@@ -60,7 +62,7 @@ def test_images_do_not_make_a_library_askable(client):
 
 
 def test_image_count_is_capped(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=build_fake()[0])
     app.state.settings  # images limited to MAX_IMAGES (12)
     with TestClient(app) as c:
         token = signup(c, "ada_l")
@@ -118,7 +120,7 @@ def test_leaving_the_room_drops_the_camera_tile(client):
 
 
 def test_camera_wall_capacity_is_enforced(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0, video_capacity=2))
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), video_capacity=2, **fake_ai_settings()), ai_transport=build_fake()[0])
     with TestClient(app) as client:
         toks = [signup(client, f"user{i}") for i in range(3)]
         import contextlib
@@ -220,7 +222,7 @@ def test_conversation_persists_across_a_restart(tmp_path):
     from app.main import create_app
 
     db = str(tmp_path / "t.db")
-    app = create_app(load_settings(db_path=db, mock_latency_scale=0.0))
+    app = create_app(load_settings(db_path=db, **fake_ai_settings()), ai_transport=build_fake()[0])
     with TestClient(app) as c:
         ta = signup(c, "alice")
         room = c.post("/api/rooms", json={"name": "Biology", "capacity": 4}, headers=auth(ta)).json()
@@ -228,7 +230,7 @@ def test_conversation_persists_across_a_restart(tmp_path):
             a.receive_json()
             a.send_json({"type": "chat", "text": "Mitochondria make ATP."}); recv_until(a, "chat")
     # fresh app on the same database: the conversation is still there
-    app2 = create_app(load_settings(db_path=db, mock_latency_scale=0.0))
+    app2 = create_app(load_settings(db_path=db, **fake_ai_settings()), ai_transport=build_fake()[0])
     with TestClient(app2) as c2:
         ta2 = signup(c2, "carol")
         conv = c2.get(f"/api/rooms/{room['code']}/conversation", headers=auth(ta2)).json()
@@ -335,61 +337,11 @@ def _drain_until(ws, kind, store, limit=60):
     raise AssertionError(f"{kind} not received")
 
 
-def test_mime_game_is_turn_based_order_fixed_only_next_revealed(client, monkeypatch):
-    from app import rooms
-    monkeypatch.setattr(rooms, "TURN_S", 0.1)
-    monkeypatch.setattr(rooms, "PREROLL_S", 0.05)
-    monkeypatch.setattr(rooms, "live_cycle", lambda room, now: {"phase": "break", "cycles": 5, "into": 1.0})
-    ta, tb = signup(client, "alice"), signup(client, "bob")
-    with client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + ta) as a, \
-         client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + tb) as b:
-        a.receive_json(); b.receive_json()
-        a.send_json({"type": "event_optin", "cycle": 5, "game": "mime"})
-        assert _drain_until(b, "event_participants", [])["game"] == "mime"
-        b.send_json({"type": "event_optin", "cycle": 5, "game": "mime"})
-        _drain_until(a, "event_participants", [])
-        a.send_json({"type": "event_start", "cycle": 5})
-
-        ma, mb = [], []
-        _drain_until(a, "game_over", ma); _drain_until(b, "game_over", mb)
-
-    start = next(m for m in mb if m["type"] == "game_start")
-    assert start["game"] == "mime" and start["total"] == 2
-    # the mime word is private to the performer, and audience 'game_next' never carries it
-    your_turns = [m for m in ma + mb if m["type"] == "game_your_turn"]
-    assert len(your_turns) == 2 and all(isinstance(m["prompt_index"], int) and m["game"] == "mime" for m in your_turns)
-    nexts = [m for m in mb if m["type"] == "game_next"]
-    assert all("karaoke_index" not in m for m in nexts)  # mime word never broadcast
-    revealed = [m["pseudo"] for m in nexts if m["pseudo"]]
-    assert set(revealed) == {"alice", "bob"} and nexts[-1]["pseudo"] is None  # names come one at a time, last is "none left"
-
-
-def test_pictionary_is_turn_based_and_the_word_is_hidden(client, monkeypatch):
-    from app import rooms
-    monkeypatch.setattr(rooms, "TURN_S", 0.1)
-    monkeypatch.setattr(rooms, "PREROLL_S", 0.05)
-    monkeypatch.setattr(rooms, "live_cycle", lambda room, now: {"phase": "break", "cycles": 7, "into": 1.0})
-    ta, tb = signup(client, "alice"), signup(client, "bob")
-    with client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + ta) as a, \
-         client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + tb) as b:
-        a.receive_json(); b.receive_json()
-        a.send_json({"type": "event_optin", "cycle": 7, "game": "pictionary"}); _drain_until(b, "event_participants", [])
-        b.send_json({"type": "event_optin", "cycle": 7, "game": "pictionary"}); _drain_until(a, "event_participants", [])
-        a.send_json({"type": "event_start", "cycle": 7})
-        ma, mb = [], []
-        _drain_until(a, "game_over", ma); _drain_until(b, "game_over", mb)
-    start = next(m for m in ma if m["type"] == "game_start")
-    assert start["game"] == "pictionary" and start["total"] == 2
-    your_turns = [m for m in ma + mb if m["type"] == "game_your_turn"]
-    assert len(your_turns) == 2 and all(m["game"] == "pictionary" and isinstance(m["prompt_index"], int) for m in your_turns)
-    nexts = [m for m in mb if m["type"] == "game_next"]
-    assert all("prompt_index" not in m and "karaoke_index" not in m for m in nexts)  # the word to draw is never broadcast
-
-
 def test_players_can_pick_different_games_and_play_in_parallel(client, monkeypatch):
     from app import rooms
     monkeypatch.setattr(rooms, "TURN_S", 0.1)
-    monkeypatch.setattr(rooms, "PREROLL_S", 0.05)
+    monkeypatch.setattr(rooms, "FIRST_PREP_S", 0.05)
+    monkeypatch.setattr(rooms, "TURN_GAP_S", 0.01)
     monkeypatch.setattr(rooms, "live_cycle", lambda room, now: {"phase": "break", "cycles": 11, "into": 1.0})
     ta, tb = signup(client, "alice"), signup(client, "bob")
     with client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + ta) as a, \
@@ -404,7 +356,7 @@ def test_players_can_pick_different_games_and_play_in_parallel(client, monkeypat
         b.send_json({"type": "game_result", "cycle": 11, "round": 0, "correct": True, "ms": 500})
         sc = _drain_until(b, "event_scores", store_b)
         assert sc["game"] == "trivia_race" and sc["leaderboard"][0]["pseudo"] == "bob"
-        assert not any(m["type"] in ("game_start", "game_your_turn", "game_next") for m in store_b)  # bob never sees mime
+        assert not any(m["type"] in ("game_start", "game_your_turn", "game_turn", "game_word") for m in store_b)  # bob never sees mime
         aturn = _drain_until(a, "game_your_turn", [])
         assert aturn["game"] == "mime"
 
@@ -460,25 +412,3 @@ def test_private_messages_reach_both_parties(client):
         got = recv_until(b, "dm")                            # the recipient gets it
         assert got["text"] == "psst" and got["from"] == "alice" and got["to"] == "bob"
         assert recv_until(a, "dm")["from"] == "alice"        # the sender keeps a copy
-
-
-def test_mime_performer_confirms_a_correct_guess(client, monkeypatch):
-    import random as _random
-    from app import rooms
-    monkeypatch.setattr(_random, "shuffle", lambda seq: None)   # order stays [alice, bob]
-    monkeypatch.setattr(_random, "randrange", lambda n: 0)
-    monkeypatch.setattr(rooms, "TURN_S", 0.6)
-    monkeypatch.setattr(rooms, "PREROLL_S", 0.05)
-    monkeypatch.setattr(rooms, "live_cycle", lambda room, now: {"phase": "break", "cycles": 9, "into": 1.0})
-    ta, tb = signup(client, "alice"), signup(client, "bob")
-    with client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + ta) as a, \
-         client.websocket_connect("/ws/rooms/LIVE-DEEP?token=" + tb) as b:
-        a.receive_json(); b.receive_json()
-        a.send_json({"type": "event_optin", "cycle": 9, "game": "mime"}); _drain_until(b, "event_participants", [])
-        b.send_json({"type": "event_optin", "cycle": 9, "game": "mime"}); _drain_until(a, "event_participants", [])
-        a.send_json({"type": "event_start", "cycle": 9})
-        _drain_until(a, "game_your_turn", [])               # alice performs round 0 and knows the word
-        a.send_json({"type": "mime_guess", "pseudo": "bob"})  # her client judged bob's guess correct
-        got = recv_until(b, "game_guessed")
-        assert got["pseudo"] == "bob" and got["by"] == "alice"
-        assert got["leaderboard"][0]["pseudo"] == "bob" and got["leaderboard"][0]["score"] == 100

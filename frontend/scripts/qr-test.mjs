@@ -24,8 +24,8 @@ function decode(value, { scale = 6, quiet = 4 } = {}) {
 test("the join links decode back to exactly the same URL", () => {
   for (const url of [
     "http://192.168.1.20:8000/forest/LIVE-FOREST",
-    "https://ednova.example.org/forest/LIVE-DEMO",
-    "https://ednova.example.org/forest/ABCD23?ref=qr&lang=ar",
+    "https://herwiego.example.org/forest/LIVE-DEMO",
+    "https://herwiego.example.org/forest/ABCD23?ref=qr&lang=ar",
     "http://localhost:5173/forest/LIVE-FOREST",
   ]) assert.equal(decode(url), url, url);
 });

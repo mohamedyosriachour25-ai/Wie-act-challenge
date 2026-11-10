@@ -12,7 +12,7 @@ export const LANGS = [
   { code: "darija", label: "الدارجة التونسية", dir: "rtl", html: "ar-TN" },
 ];
 const DICTS = { fr, ar, darija };
-const KEY = "ednova.lang";
+const KEY = "herwiego.lang";
 
 /** Marks a sentence for translation where it cannot be translated yet (module-level data). Translate it with t() when rendering. */
 export const tx = (text) => text;

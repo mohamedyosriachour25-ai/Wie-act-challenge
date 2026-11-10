@@ -2,8 +2,8 @@ import random, json, base64
 from playwright.sync_api import sync_playwright
 
 import os
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
 def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  {extra}" if extra else ""), flush=True)
@@ -16,11 +16,11 @@ PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001
 open("/tmp/diagram.png", "wb").write(PNG)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=["--no-sandbox"])
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=["--no-sandbox"])
     ctx = br.new_context(viewport={"width": 1100, "height": 1000}); page = ctx.new_page()
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
     page.goto(BASE + "/study"); page.wait_for_selector(".auth-card"); register(page, f"img_{random.randint(1000,9999)}")
-    page.wait_for_selector(".diag"); page.get_by_role("button", name="Skip for now").click()
+    page.wait_for_selector(".welcome")
     page.wait_for_selector(".materials")
     check("empty state mentions images", "image" in page.locator(".materials").inner_text().lower())
 

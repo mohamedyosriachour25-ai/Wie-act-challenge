@@ -2,8 +2,8 @@ import sys, time, json
 from playwright.sync_api import sync_playwright
 
 import os
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
 def poll(page, expr, ms=20000):
     import time as _t; end=_t.time()+ms/1000
@@ -30,7 +30,7 @@ def register(page, pseudo):
     page.get_by_role("button", name="Create account").click()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=["--no-sandbox"])
+    browser = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=["--no-sandbox"])
     ctx1 = browser.new_context(viewport={"width": 1280, "height": 900})
     page = ctx1.new_page(); watch(page, "A")
 
@@ -43,18 +43,13 @@ with sync_playwright() as p:
     page.wait_for_selector(".progress")
     check("registered, progress panel on home", page.locator(".progress").count() == 1)
 
-    # ---- Solo study: diagnostic
+    # ---- Solo study opens straight on the tutor (no learning-style quiz any more)
     page.get_by_role("link", name="Solo study").first.click()
-    page.wait_for_selector(".diag")
-    for _ in range(4):
-        page.locator(".option").first.click(); page.wait_for_timeout(150)
-    page.wait_for_selector("text=Your learning style")
-    page.screenshot(path=f"{SHOTS}/02-diagnostic-result.png")
-    page.get_by_role("button", name="Start studying").click()
     page.wait_for_selector(".welcome")
+    check("solo study opens without a quiz", page.locator(".diag").count() == 0)
 
     # ---- Explain Thales
-    page.get_by_role("button", name="Thales theorem").click()
+    page.locator(".composer input").fill("Thales theorem"); page.locator(".composer .send").click()
     page.wait_for_selector(".thinking")
     page.screenshot(path=f"{SHOTS}/03-loading.png")
     page.wait_for_selector(".explain", timeout=20000)

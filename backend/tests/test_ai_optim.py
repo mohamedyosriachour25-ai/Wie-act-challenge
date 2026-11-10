@@ -4,14 +4,13 @@ import pytest
 
 from app.ai import prompts
 from app.ai.gateway import Gateway
-from app.ai.mock_api import build_mock
 from app.ai.pipeline import explain
 from app.ai.semcache import SemanticCache, cosine
 from app.config import Settings, load_settings
 from app.main import create_app
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ._fake_service import build_fake, fake_ai_settings
 from .test_app import auth, signup
 
 pytestmark = pytest.mark.anyio
@@ -23,11 +22,9 @@ def anyio_backend():
 
 
 def make(**over):
-    s = Settings(mock_latency_scale=0.0, **over)
-    app = FastAPI()
-    router, _ = build_mock(s)
-    app.include_router(router)
-    gw = Gateway(s, httpx.ASGITransport(app=app))
+    s = Settings(base_url="http://fake-ai.test", api_key="test-key", **over)
+    transport, _ = build_fake({s.compact_model: "compact", s.mid_model: "mid"})
+    gw = Gateway(s, transport)
     gw.semcache = SemanticCache(gw, s)
     return gw
 
@@ -102,7 +99,7 @@ async def test_malformed_json_is_repaired_with_the_schema():
         bad["n"] += 1
         return httpx.Response(200, json={"choices": [{"message": {"content": "Sure! here you go: {oops not json"}}], "usage": {}})
 
-    gw = Gateway(Settings(mock_latency_scale=0.0, base_url="https://ai.test/v1", api_key="k"), httpx.MockTransport(handler))
+    gw = Gateway(Settings(base_url="https://ai.test/v1", api_key="k"), httpx.MockTransport(handler))
     from app.ai.pipeline import _validate_route
     obj, meta = await gw.chat_json("route", "compact", prompts.route_messages("x"), _validate_route, schema=prompts.ROUTE_SCHEMA)
     assert obj == {"subject_area": "math", "level": "beginner"} and gw.metrics.repairs == 1 and bad["n"] == 1
@@ -117,7 +114,8 @@ def test_prompts_carry_worked_examples_and_schemas():
 
 
 def test_metrics_expose_semantic_hits():
-    with TestClient(create_app(load_settings(db_path=":memory:", mock_latency_scale=0.0, sem_threshold=0.6))) as c:
+    transport, _ = build_fake()
+    with TestClient(create_app(load_settings(db_path=":memory:", sem_threshold=0.6, **fake_ai_settings()), ai_transport=transport)) as c:
         token = signup(c, "ada_l")
         c.post("/api/study/explain", json={"topic": "Thales theorem"}, headers=auth(token))
         c.post("/api/study/explain", json={"topic": "explain the Thales theorem"}, headers=auth(token))
@@ -143,7 +141,7 @@ def _quiz_gateway(verify: bool):
         reply = _quiz_json(2) if "TASK: quiz_check" in system else _quiz_json(0)  # reviewer fixes the key 0 -> 2
         return httpx.Response(200, json={"choices": [{"message": {"content": reply}}], "usage": {}})
 
-    s = Settings(mock_latency_scale=0.0, base_url="https://ai.test/v1", api_key="k", quiz_verify=verify)
+    s = Settings(base_url="https://ai.test/v1", api_key="k", quiz_verify=verify)
     return Gateway(s, httpx.MockTransport(handler))
 
 
@@ -164,7 +162,7 @@ async def test_quiz_verification_can_be_turned_off():
     assert gw.metrics.calls == {"compact": 0, "mid": 1} and len(meta["calls"]) == 1
 
 
-async def test_live_mock_runs_both_quiz_passes():
+async def test_fake_service_runs_both_quiz_passes():
     gw = make()  # fake service: the quiz_check task returns a clean quiz, so the revise step is exercised
     from app.ai.pipeline import get_quiz
     questions, meta = await get_quiz(gw, "Photosynthesis")

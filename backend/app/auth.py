@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from . import security
+from . import scoring, security
 from .i18n import lang_of, tr
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -38,9 +38,12 @@ def user_from_token(app, token: str) -> dict | None:
         data = json.loads(base64.urlsafe_b64decode(body.encode()))
         if data["exp"] < time.time():
             return None
-        return app.state.db.one("SELECT id, pseudo, learning_style FROM users WHERE id=?", (data["uid"],))
+        user = app.state.db.one("SELECT id, pseudo, learning_style FROM users WHERE id=?", (data["uid"],))
     except Exception:
         return None
+    if user:
+        scoring.seen(app.state.db, user["id"])     # last seen + the daily visit / streak bonus
+    return user
 
 
 def current_user(request: Request) -> dict:
@@ -80,6 +83,9 @@ def register(body: Credentials, request: Request):
         "INSERT INTO users (pseudo, pw_hash, salt, created_at) VALUES (?, ?, ?, ?)",
         (pseudo, _hash(body.password, salt), salt.hex(), time.time()),
     )
+    scoring.track(db, cur.lastrowid, "signup")
+    scoring.award(db, cur.lastrowid, "signup")
+    scoring.seen(db, cur.lastrowid, login=True)
     return _session(request, {"id": cur.lastrowid, "pseudo": pseudo, "learning_style": None})
 
 
@@ -96,6 +102,8 @@ def login(body: Credentials, request: Request):
         security.record_login_failure(request, pseudo)
         raise HTTPException(401, tr(lang_of(request), "Pseudo or password is wrong."))
     security.clear_login_failures(request, pseudo)
+    scoring.track(db, row["id"], "login")
+    scoring.seen(db, row["id"], login=True)
     return _session(request, row)
 
 

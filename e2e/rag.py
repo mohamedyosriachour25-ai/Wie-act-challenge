@@ -2,8 +2,8 @@ import random, sys, time
 from playwright.sync_api import sync_playwright
 
 import os
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
 def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  {extra}" if extra else ""), flush=True)
@@ -23,10 +23,10 @@ open("/tmp/biology.md", "w").write(NOTES)
 a, b = f"rag_a{random.randint(1000,9999)}", f"rag_b{random.randint(1000,9999)}"
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=["--no-sandbox"])
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=["--no-sandbox"])
     ctx1 = br.new_context(viewport={"width": 1280, "height": 1000}); page = ctx1.new_page(); watch(page, "A")
     page.goto(BASE + "/study"); page.wait_for_selector(".auth-card"); register(page, a)
-    page.wait_for_selector(".diag"); page.get_by_role("button", name="Skip for now").click()
+    page.wait_for_selector(".welcome")
     page.wait_for_selector(".materials")
     check("empty library invites to add material", "Nothing here yet" in page.locator(".materials").inner_text())
 

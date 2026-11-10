@@ -17,7 +17,7 @@ from starlette.responses import JSONResponse
 
 from .i18n import lang_of, tr
 
-log = logging.getLogger("ednova")
+log = logging.getLogger("herwiego")
 
 
 class SlidingWindow:
@@ -54,7 +54,7 @@ class SlidingWindow:
 
 
 def client_ip(request) -> str:
-    """Peer address. X-Forwarded-For is only trusted when EDNOVA_TRUST_PROXY=1 (behind your own proxy)."""
+    """Peer address. X-Forwarded-For is only trusted when HERWIEGO_TRUST_PROXY=1 (behind your own proxy)."""
     s = request.app.state.settings
     if s.trust_proxy:
         fwd = request.headers.get("x-forwarded-for", "")
@@ -154,7 +154,7 @@ class RedactFilter(logging.Filter):
 
 def setup_logging(settings) -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    root = logging.getLogger("ednova")
+    root = logging.getLogger("herwiego")
     root.setLevel(level)
     root.propagate = False
     if not root.handlers:

@@ -5,6 +5,7 @@ import { useT } from "../lib/i18n.jsx";
 import { AuthGate, TimerRing } from "../components/Common.jsx";
 import QrCode from "../components/QrCode.jsx";
 import Tree from "../components/Tree.jsx";
+import PocketTreePanel from "../components/PocketTreePanel.jsx";
 
 // These mirror the server rules in app/rooms.py (TREE_GRACE_S, TREE_MIN_S); the server is the judge.
 const GRACE_S = 30;
@@ -27,12 +28,19 @@ function ForestView({ code }) {
   const [log, setLog] = useState([]);
   const [me, setMe] = useState("");
   const [copied, setCopied] = useState(false);
+  const [phoneAlertAt, setPhoneAlertAt] = useState(0);
 
   const onEvent = useCallback((m) => {
     if (m.type === "snapshot") { setRoom(m.room); setPresence(m.presence); setTimer(m.timer); setMe(m.you); setLog(m.forest || []); }
     if (m.type === "presence") setPresence(m.presence);
     if (m.type === "tree") setLog((l) => [...l.slice(-199), m.entry]);
+    if (m.type === "phone_tree_alert") setPhoneAlertAt(Date.now());
   }, []);
+  useEffect(() => {
+    if (!phoneAlertAt) return;
+    const id = setTimeout(() => setPhoneAlertAt(0), 6000);
+    return () => clearTimeout(id);
+  }, [phoneAlertAt]);
   const { conn, error, send, now } = useRoomSocket(code, onEvent);
   const cycle = useCycle(timer, now);
   const focused = useFocusSignal(true, null, { idleMs: Infinity }); // in the forest only the tab matters
@@ -101,6 +109,7 @@ function ForestView({ code }) {
           <h3>{t("Your tree")}</h3>
           <Tree className="tree-big" p={myP} state={myTree?.state || "growing"} label={myTree ? label(me, myTree, myP) : t("Planting your tree…")} />
           <p className={`small tree-status ${myTree?.state === "wilted" ? "wilted" : ""}`} role="status" aria-live="polite" data-tree-state={myTree?.state || "none"}>{status}</p>
+          {phoneAlertAt > 0 && <p className="small tree-status wilted" role="status" aria-live="assertive">{t("Your pocket tree withered — come back and stay focused!")}</p>}
           <p className="muted small">{t("Only a yes/no focus signal from this tab is shared with the room. Nothing else leaves your device.")}</p>
         </section>
 
@@ -136,10 +145,12 @@ function ForestView({ code }) {
           <p className="small join-url"><code>{url}</code></p>
           <button className="btn small" onClick={copy}>{copied ? t("Copied") : t("Copy link")}</button>
           {LOCAL_HOSTS.includes(window.location.hostname) && (
-            <p className="muted small">{t("This address only works on this computer. Open EdNova through your network address or its public address so phones can join.")}</p>
+            <p className="muted small">{t("This address only works on this computer. Open HerwieGO through your network address or its public address so phones can join.")}</p>
           )}
           <p className="small"><Link to={`/live/${code}`}>{t("Open as a plain focus room")}</Link></p>
         </section>
+
+        <PocketTreePanel code={code} />
       </div>
     </>
   );

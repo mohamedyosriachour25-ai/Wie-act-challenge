@@ -9,11 +9,13 @@ from app import security
 from app.config import load_settings
 from app.main import create_app
 
+from ._fake_service import build_fake, fake_ai_settings
 from .test_app import auth, recv_until, signup
 
 
 def make_client(tmp_path, **overrides):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0, **overrides))
+    settings = {**fake_ai_settings(), "db_path": str(tmp_path / "t.db"), **overrides}
+    app = create_app(load_settings(**settings), ai_transport=build_fake()[0])
     return TestClient(app)
 
 
@@ -72,12 +74,12 @@ def test_account_creation_is_limited_per_connection(tmp_path):
 
 
 def test_production_refuses_weak_configuration(tmp_path):
-    with pytest.raises(RuntimeError, match="EDNOVA_SECRET"):
+    with pytest.raises(RuntimeError, match="HERWIEGO_SECRET"):
         load_settings(env="production", db_path=str(tmp_path / "t.db"))
-    with pytest.raises(RuntimeError, match="EDNOVA_API_KEY"):
+    with pytest.raises(RuntimeError, match="HERWIEGO_API_KEY"):
         load_settings(env="production", secret="x" * 32, base_url="https://ai.example/v1", api_key="replace-me")
-    ok = load_settings(env="production", secret="x" * 32, db_path=str(tmp_path / "t.db"))
-    app = create_app(ok)
+    ok = load_settings(env="production", secret="x" * 32, db_path=str(tmp_path / "t.db"), **fake_ai_settings())
+    app = create_app(ok, ai_transport=build_fake()[0])
     with TestClient(app) as c:
         for path in ("/docs", "/openapi.json"):  # the single-page app answers unknown paths; the API docs must not
             r = c.get(path)
@@ -118,11 +120,11 @@ def test_secrets_never_reach_the_logs():
 
 def test_application_log_is_redacted_end_to_end(tmp_path, caplog):
     with make_client(tmp_path, api_key="very-secret-team-key") as c:
-        logging.getLogger("ednova").addHandler(caplog.handler)
-        logging.getLogger("ednova").info("debug with very-secret-team-key inside")
-        for h in logging.getLogger("ednova").handlers:
+        logging.getLogger("herwiego").addHandler(caplog.handler)
+        logging.getLogger("herwiego").info("debug with very-secret-team-key inside")
+        for h in logging.getLogger("herwiego").handlers:
             if any(isinstance(x, security.RedactFilter) for x in h.filters):
-                rec = logging.LogRecord("ednova", logging.INFO, "", 0, "x very-secret-team-key y", (), None)
+                rec = logging.LogRecord("herwiego", logging.INFO, "", 0, "x very-secret-team-key y", (), None)
                 for flt in h.filters:
                     flt.filter(rec)
                 assert "very-secret-team-key" not in rec.msg
@@ -132,7 +134,7 @@ def test_application_log_is_redacted_end_to_end(tmp_path, caplog):
 
 
 def test_unfinished_indexing_resumes_after_a_restart(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=build_fake()[0])
     db = app.state.db
     user = db.execute("INSERT INTO users (pseudo, pw_hash, salt, created_at) VALUES ('ada_l', 'x', '00', ?)", (time.time(),)).lastrowid
     doc = db.execute("INSERT INTO docs (collection, title, owner_id, status, chunks_total, created_at) VALUES (?, 'Biology', ?, 'indexing', 3, ?)", (f"u:{user}", user, time.time())).lastrowid
@@ -149,7 +151,7 @@ def test_unfinished_indexing_resumes_after_a_restart(tmp_path):
 
 def test_health_reports_database_state(tmp_path):
     with make_client(tmp_path) as c:
-        assert c.get("/api/health").json() == {"ok": True, "mock": True}
+        assert c.get("/api/health").json() == {"ok": True}
 
 
 def test_sliding_window_unit():

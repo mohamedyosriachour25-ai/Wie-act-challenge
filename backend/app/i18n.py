@@ -131,6 +131,8 @@ _T: dict[str, tuple[str, str, str]] = {
     "Live focus rooms are not saved as conversations.": ("Les salles de concentration en direct ne sont pas enregistrées comme conversations.", "لا تُحفظ غرف التركيز المباشرة كمحادثات.", "غرف التركيز المباشرة ما تتحفظش كمحادثات."),
     "Unknown grade.": ("Note inconnue.", "تقييم غير معروف.", "تقييم ما معروفش."),
     "That card does not exist.": ("Cette carte n'existe pas.", "هذه البطاقة غير موجودة.", "البطاقة هذي ما موجودةش."),
+    "This pocket-tree link is invalid or has expired.": (
+        "Ce lien d'arbre de poche est invalide ou a expiré.", "رابط الشجرة المحمولة غير صالح أو انتهت صلاحيته.", "الرابط متاع الشجرة ما يخدمش أو خلص وقتو."),
 }
 
 CATALOG: dict[str, dict[str, str]] = {

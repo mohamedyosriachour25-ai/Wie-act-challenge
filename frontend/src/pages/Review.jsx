@@ -29,8 +29,10 @@ export default function Review() {
 
   return (
     <div className="narrow review">
-      <h1>{t("Revision")}</h1>
-      <p className="muted">{t("Cards from your quizzes come back for review just before you would forget them.")}</p>
+      <div className="page-head">
+        <h1>{t("Revision")}</h1>
+        <p className="muted">{t("Cards from your quizzes come back for review just before you would forget them.")}</p>
+      </div>
       {cards == null ? (
         <p className="muted">{t("Loading…")}</p>
       ) : cards.length === 0 ? (

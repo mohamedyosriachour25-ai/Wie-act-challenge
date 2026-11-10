@@ -3,15 +3,19 @@ mid-size; classification, extraction, short summaries, hints and material answer
 import pytest
 from fastapi.testclient import TestClient
 
-from app.ai import mock_llm, prompts
+from app.ai import prompts
 from app.ai.visuals import describe_figure
 from app.config import load_settings
 from app.main import create_app
 
+from . import _fake_service as mock_llm
+from ._fake_service import build_fake, fake_ai_settings
+
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    transport, _ = build_fake()
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=transport)
     with TestClient(app) as c:
         yield c
 

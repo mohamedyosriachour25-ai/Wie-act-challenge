@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import materials, security
+from . import materials, scoring, security
 from .i18n import lang_of, tr
 from .ai import pipeline
 from .ai.gateway import AIError
@@ -91,10 +91,6 @@ class FinishBody(BaseModel):
     total: int
 
 
-class SimulateBody(BaseModel):
-    mode: str
-
-
 def ai_error_message(exc: AIError, lang: str) -> str:
     if exc.kind in ("bad_request", "upstream"):
         return tr(lang, "The AI service could not handle this request. Try again later.")
@@ -112,10 +108,20 @@ def ai_error_response(exc: AIError, lang: str = "en") -> JSONResponse:
 
 
 def log_event(request: Request, user_id: int, kind: str, topic: str, correct: int = 0, total: int = 0) -> None:
-    request.app.state.db.execute(
+    db = request.app.state.db
+    db.execute(
         "INSERT INTO events (user_id, ts, kind, topic, correct, total) VALUES (?, ?, ?, ?, ?, ?)",
         (user_id, time.time(), kind, topic[:160], correct, total),
     )
+    scoring.track(db, user_id, kind, {"topic": topic[:80], "correct": correct, "total": total} if total else {"topic": topic[:80]})
+    if kind == "explain":
+        scoring.award(db, user_id, "explain", ref=topic[:80])
+    elif kind == "quiz":
+        scoring.award(db, user_id, "quiz_correct", units=correct, ref=topic[:80])
+        if total >= 3 and correct == total:
+            scoring.award(db, user_id, "quiz_perfect", ref=topic[:80])
+    elif kind == "resume":
+        scoring.award(db, user_id, "resume")
 
 
 @router.get("/study/diagnostic")
@@ -261,8 +267,8 @@ def progress(request: Request):
     return {
         "pseudo": user["pseudo"],
         "learning_style": user["learning_style"],
-        "xp": correct * 10 + sum(1 for e in events if e["kind"] == "explain") * 5,
-        "streak_days": streak,
+        "xp": scoring.total(db, user["id"]),                      # the account score (see app/scoring.py)
+        "streak_days": max(streak, scoring.streak_days(db, user["id"])),
         "quizzes": len(quizzes),
         "accuracy": round(correct / total, 2) if total else None,
         "topics": sorted(topics.values(), key=lambda t: -t["last"])[:12],
@@ -278,18 +284,4 @@ def ai_status(request: Request):
 @router.get("/ai/metrics")
 def ai_metrics(request: Request):
     gw = request.app.state.gateway
-    return {**gw.metrics.to_dict(), "cache_entries": len(gw.cache), "mock": gw.s.is_mock, "models": {"compact": gw.s.compact_model, "mid": gw.s.mid_model}}
-
-
-@router.post("/ai/simulate")
-def ai_simulate(body: SimulateBody, request: Request):
-    """Demo helper: only works against the built-in fake service."""
-    state = request.app.state.mock_state
-    if state is None:
-        raise HTTPException(400, "Simulation is only available with the built-in fake service.")
-    if body.mode not in ("quota", "saturate", "clear"):
-        raise HTTPException(400, "Mode must be quota, saturate or clear.")
-    state.simulate(body.mode)
-    if body.mode == "clear":
-        request.app.state.gateway.cooldown_until = 0.0
-    return {"ok": True, "mode": body.mode}
+    return {**gw.metrics.to_dict(), "cache_entries": len(gw.cache), "models": {"compact": gw.s.compact_model, "mid": gw.s.mid_model}}

@@ -2,8 +2,8 @@ import random, json
 from playwright.sync_api import sync_playwright
 
 import os
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
 def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  {extra}" if extra else ""), flush=True)
@@ -25,7 +25,7 @@ def poll(page, expr, timeout=12000):
     return False
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=ARGS)
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=ARGS)
     # two people join the same Live room and both turn their camera on
     ca = br.new_context(viewport={"width": 1100, "height": 900}, permissions=["camera"])
     cb = br.new_context(viewport={"width": 1100, "height": 900}, permissions=["camera"])

@@ -111,12 +111,9 @@ def extract_json(text: str):
 class Gateway:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.s = settings
-        if settings.is_mock:
-            base = "http://mock/mock/v1"
-        else:
-            base = settings.base_url.rstrip("/")
-            if not base.endswith("/v1"):
-                base += "/v1"
+        base = settings.base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
         self.client = httpx.AsyncClient(
             base_url=base,
             headers={"Authorization": f"Bearer {settings.api_key}"},
@@ -156,7 +153,6 @@ class Gateway:
             "active": self._active,
             "notice": notice,
             "quota_remaining": self.quota_remaining,
-            "mock": self.s.is_mock,
         }
 
     def reset_runtime(self) -> None:

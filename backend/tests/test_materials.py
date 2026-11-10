@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.config import load_settings
 from app.main import create_app
+
+from ._fake_service import build_fake, fake_ai_settings
 from app.materials import chunk_text, cosine, pack, personal_data_reason, unpack
 
 PHOTO = (
@@ -22,7 +24,7 @@ HISTORY = (
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=build_fake()[0])
     with TestClient(app) as c:
         yield c
 

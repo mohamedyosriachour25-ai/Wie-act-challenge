@@ -5,12 +5,23 @@ from fastapi.testclient import TestClient
 from app.config import load_settings
 from app.main import create_app
 
+from ._fake_service import build_fake, fake_ai_settings
+
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    transport, _ = build_fake()
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=transport)
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def client_and_state(tmp_path):
+    transport, state = build_fake()
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=transport)
+    with TestClient(app) as c:
+        yield c, state
 
 
 def signup(client, pseudo="ada_l", password="secret1"):
@@ -54,7 +65,7 @@ def test_every_explanation_comes_with_an_illustration(client):
     thales = client.post("/api/study/explain", json={"topic": "Thales theorem"}, headers=h).json()
     assert thales["visual"]["template"] == "thales" and len(thales["steps"]) >= 3
     other = client.post("/api/study/explain", json={"topic": "French revolution causes"}, headers=h).json()
-    assert other["visual"]["template"] == "concept_map"
+    assert other["visual"]["template"] == "timeline"
     assert client.post("/api/study/explain", json={"topic": " "}, headers=h).status_code == 400
 
 
@@ -78,7 +89,7 @@ def test_hint_ladder_and_quiz_flow_and_progress(client):
     assert ans["correct"] is True and ans["why"]
     client.post("/api/study/quiz/finish", json={"topic": topic, "correct": 3, "total": 4}, headers=h)
     p = client.get("/api/progress", headers=h).json()
-    assert p["quizzes"] == 1 and p["accuracy"] == 0.75 and p["xp"] == 30
+    assert p["quizzes"] == 1 and p["accuracy"] == 0.75 and p["xp"] == 10 + 5 + 30   # welcome + daily visit + 3 correct
 
 
 def test_group_room_capacity_is_enforced(client):
@@ -147,10 +158,23 @@ def test_live_room_follows_a_fixed_schedule_and_counts_focus(client):
         assert recv_until(b, "reaction")["emoji"] == "🔥"
 
 
-def test_simulation_endpoint_drives_the_resilience_demo(client):
+def test_saturation_falls_back_to_the_compact_model(client_and_state):
+    client, state = client_and_state
     h = auth(signup(client))
-    assert client.post("/api/ai/simulate", json={"mode": "saturate"}).status_code == 200
+    state.simulate("saturate")
     r = client.post("/api/study/explain", json={"topic": "Photosynthesis"}, headers=h).json()
     assert r["meta"]["degraded"] is True
     m = client.get("/api/ai/metrics").json()
     assert m["fallbacks"] == 2  # both mid calls (figure + explanation text) fall back to compact
+
+
+def test_my_rooms_lists_the_study_rooms_i_created_newest_first(client):
+    h = auth(signup(client, "notepad_ada"))
+    first = client.post("/api/rooms", json={"name": "Linear algebra"}, headers=h).json()
+    second = client.post("/api/rooms", json={"name": "Thermodynamics", "is_public": False}, headers=h).json()
+    other = auth(signup(client, "notepad_bob"))
+    client.post("/api/rooms", json={"name": "Not mine"}, headers=other)
+    mine = client.get("/api/rooms/mine", headers=h).json()["rooms"]
+    assert [r["code"] for r in mine] == [second["code"], first["code"]]   # private rooms count too
+    assert all({"name", "topic", "summary", "last_at"} <= set(r) for r in mine)
+    assert client.get("/api/rooms/mine").status_code == 401

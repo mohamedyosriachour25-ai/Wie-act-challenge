@@ -2,14 +2,25 @@ import Thales from "./Thales.jsx";
 import FunctionPlot from "./FunctionPlot.jsx";
 import ProcessFlow from "./ProcessFlow.jsx";
 import ConceptMap from "./ConceptMap.jsx";
+import Timeline from "./Timeline.jsx";
+import Comparison from "./Comparison.jsx";
 import { tx, useT } from "../lib/i18n.jsx";
 
-const RENDERERS = { thales: Thales, function_plot: FunctionPlot, process_flow: ProcessFlow, concept_map: ConceptMap };
+const RENDERERS = {
+  thales: Thales,
+  function_plot: FunctionPlot,
+  process_flow: ProcessFlow,
+  concept_map: ConceptMap,
+  timeline: Timeline,
+  comparison: Comparison,
+};
 const NAMES = {
   thales: tx("Interactive figure"),
   function_plot: tx("Interactive graph"),
   process_flow: tx("Step-through diagram"),
   concept_map: tx("Concept map"),
+  timeline: tx("Timeline"),
+  comparison: tx("Comparison"),
 };
 
 /** The drawing board that sits beside every explanation. `focus` comes from the step being read. */

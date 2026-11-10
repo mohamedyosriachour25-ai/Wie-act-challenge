@@ -1,24 +1,24 @@
 # docker compose up --build        (reads ./.env; copy .env.example first)
 services:
-  ednova:
+  herwiego:
     build: .
     ports:
       - "8000:8000"
     environment:
-      EDNOVA_ENV: production
-      EDNOVA_SECRET: ${EDNOVA_SECRET:?set EDNOVA_SECRET in .env (openssl rand -hex 32)}
-      EDNOVA_BASE_URL: ${EDNOVA_BASE_URL:-mock}
-      EDNOVA_API_KEY: ${EDNOVA_API_KEY:-dev-mock-key}
-      EDNOVA_COMPACT_MODEL: ${EDNOVA_COMPACT_MODEL:-compact-1b}
-      EDNOVA_MID_MODEL: ${EDNOVA_MID_MODEL:-mid-8b}
-      EDNOVA_EMBED_MODEL: ${EDNOVA_EMBED_MODEL:-embed-small}
-      EDNOVA_MIN_SIMILARITY: ${EDNOVA_MIN_SIMILARITY:-0.1}
-      EDNOVA_MAX_CONCURRENT: ${EDNOVA_MAX_CONCURRENT:-2}
-      EDNOVA_USER_AI_PER_MIN: ${EDNOVA_USER_AI_PER_MIN:-20}
-      EDNOVA_TRUST_PROXY: ${EDNOVA_TRUST_PROXY:-0}
-      EDNOVA_VIDEO_CAPACITY: ${EDNOVA_VIDEO_CAPACITY:-6}
+      HERWIEGO_ENV: production
+      HERWIEGO_SECRET: ${HERWIEGO_SECRET:?set HERWIEGO_SECRET in .env (openssl rand -hex 32)}
+      HERWIEGO_BASE_URL: ${HERWIEGO_BASE_URL:?set HERWIEGO_BASE_URL in .env -- there is no built-in fallback}
+      HERWIEGO_API_KEY: ${HERWIEGO_API_KEY:?set HERWIEGO_API_KEY in .env -- there is no built-in fallback}
+      HERWIEGO_COMPACT_MODEL: ${HERWIEGO_COMPACT_MODEL:-compact-1b}
+      HERWIEGO_MID_MODEL: ${HERWIEGO_MID_MODEL:-mid-8b}
+      HERWIEGO_EMBED_MODEL: ${HERWIEGO_EMBED_MODEL:-embed-small}
+      HERWIEGO_MIN_SIMILARITY: ${HERWIEGO_MIN_SIMILARITY:-0.1}
+      HERWIEGO_MAX_CONCURRENT: ${HERWIEGO_MAX_CONCURRENT:-2}
+      HERWIEGO_USER_AI_PER_MIN: ${HERWIEGO_USER_AI_PER_MIN:-20}
+      HERWIEGO_TRUST_PROXY: ${HERWIEGO_TRUST_PROXY:-0}
+      HERWIEGO_VIDEO_CAPACITY: ${HERWIEGO_VIDEO_CAPACITY:-6}
     volumes:
-      - ednova-data:/data
+      - herwiego-data:/data
     restart: unless-stopped
 volumes:
-  ednova-data:
+  herwiego-data:

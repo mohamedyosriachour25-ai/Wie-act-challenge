@@ -1,5 +1,8 @@
 """Runtime settings. Everything that differs between dev and the challenge
-(base URL, key, model names) comes from the environment: nothing is hard-coded."""
+(base URL, key, model names) comes from the environment: nothing is hard-coded.
+
+There is no built-in fake AI service and no fallback: HERWIEGO_BASE_URL and HERWIEGO_API_KEY must point
+at a real OpenAI-compatible inference service, in every environment, or the app refuses to start."""
 from __future__ import annotations
 
 import dataclasses
@@ -22,9 +25,10 @@ def _load_dotenv() -> None:
 
 @dataclass(frozen=True)
 class Settings:
-    # "mock" runs the built-in fake EdNova service in-process (development and demo).
-    base_url: str = "mock"
-    api_key: str = "dev-mock-key"
+    # Your real OpenAI-compatible inference service. No default works out of the box on purpose:
+    # there is nothing for the app to fall back to.
+    base_url: str = ""
+    api_key: str = ""
     compact_model: str = "compact-1b"
     mid_model: str = "mid-8b"
     embed_model: str = "embed-small"
@@ -36,9 +40,8 @@ class Settings:
     sem_threshold_ask: float = 0.93    # stricter for material questions: a small wording change can change intent
     quiz_verify: bool = True           # draft-then-revise: a compact pass reviews the mid-size quiz draft
     max_quota_wait_s: float = 45.0    # longer than this and we tell the user instead of blocking
-    db_path: str = "ednova.db"
+    db_path: str = "herwiego.db"
     secret: str = "dev-secret-change-me"
-    mock_latency_scale: float = 1.0
     live_capacity: int = 500          # the public space (presence + chat) holds many; cameras are capped below
     env: str = "development"          # "production" refuses to start with a weak secret and hides /docs
     log_level: str = "INFO"
@@ -55,54 +58,50 @@ class Settings:
     def is_production(self) -> bool:
         return self.env == "production"
 
-    def production_problems(self) -> list[str]:
-        if not self.is_production:
-            return []
+    def startup_problems(self) -> list[str]:
+        """Checked in every environment: there is no fake AI service to fall back to."""
         out = []
-        if self.secret in ("dev-secret-change-me", "change-me-for-any-shared-deployment") or len(self.secret) < 24:
-            out.append("EDNOVA_SECRET must be a random string of at least 24 characters")
-        if not self.is_mock and self.api_key in ("", "replace-me", "dev-mock-key"):
-            out.append("EDNOVA_API_KEY is not set")
+        if self.is_production and (self.secret in ("dev-secret-change-me", "change-me-for-any-shared-deployment") or len(self.secret) < 24):
+            out.append("HERWIEGO_SECRET must be a random string of at least 24 characters")
+        if not self.base_url.strip():
+            out.append("HERWIEGO_BASE_URL is not set: point it at your real AI service (there is no mock fallback)")
+        if self.api_key in ("", "replace-me"):
+            out.append("HERWIEGO_API_KEY is not set")
         return out
-
-    @property
-    def is_mock(self) -> bool:
-        return self.base_url.strip().lower() in ("mock", "inprocess")
 
 
 def load_settings(**overrides) -> Settings:
     _load_dotenv()
     env = os.environ.get
     settings = Settings(
-        base_url=env("EDNOVA_BASE_URL", "mock"),
-        api_key=env("EDNOVA_API_KEY", "dev-mock-key"),
-        compact_model=env("EDNOVA_COMPACT_MODEL", "compact-1b"),
-        mid_model=env("EDNOVA_MID_MODEL", "mid-8b"),
-        embed_model=env("EDNOVA_EMBED_MODEL", "embed-small"),
-        min_similarity=float(env("EDNOVA_MIN_SIMILARITY", "0.1")),
-        max_concurrent=int(env("EDNOVA_MAX_CONCURRENT", "2")),
-        cache_ttl_s=int(env("EDNOVA_CACHE_TTL_S", str(6 * 3600))),
-        semantic_cache=env("EDNOVA_SEMANTIC_CACHE", "1") != "0",
-        sem_threshold=float(env("EDNOVA_SEM_THRESHOLD", "0.86")),
-        sem_threshold_ask=float(env("EDNOVA_SEM_THRESHOLD_ASK", "0.93")),
-        quiz_verify=env("EDNOVA_QUIZ_VERIFY", "1") != "0",
-        max_quota_wait_s=float(env("EDNOVA_MAX_QUOTA_WAIT_S", "45")),
-        db_path=env("EDNOVA_DB", "ednova.db"),
-        secret=env("EDNOVA_SECRET", "dev-secret-change-me"),
-        mock_latency_scale=float(env("EDNOVA_MOCK_LATENCY_SCALE", "1")),
-        live_capacity=int(env("EDNOVA_LIVE_CAPACITY", "200")),
-        env=env("EDNOVA_ENV", "development").strip().lower(),
-        log_level=env("EDNOVA_LOG_LEVEL", "INFO"),
-        trust_proxy=env("EDNOVA_TRUST_PROXY", "0") == "1",
-        user_ai_per_min=int(env("EDNOVA_USER_AI_PER_MIN", "20")),
-        login_attempts=int(env("EDNOVA_LOGIN_ATTEMPTS", "8")),
-        register_per_hour=int(env("EDNOVA_REGISTER_PER_HOUR", "15")),
-        video_capacity=int(env("EDNOVA_VIDEO_CAPACITY", "9")),
-        event_lead_s=int(env("EDNOVA_EVENT_LEAD_S", "300")),
-        event_min_players=int(env("EDNOVA_EVENT_MIN_PLAYERS", "2")),
+        base_url=env("HERWIEGO_BASE_URL", ""),
+        api_key=env("HERWIEGO_API_KEY", ""),
+        compact_model=env("HERWIEGO_COMPACT_MODEL", "compact-1b"),
+        mid_model=env("HERWIEGO_MID_MODEL", "mid-8b"),
+        embed_model=env("HERWIEGO_EMBED_MODEL", "embed-small"),
+        min_similarity=float(env("HERWIEGO_MIN_SIMILARITY", "0.1")),
+        max_concurrent=int(env("HERWIEGO_MAX_CONCURRENT", "2")),
+        cache_ttl_s=int(env("HERWIEGO_CACHE_TTL_S", str(6 * 3600))),
+        semantic_cache=env("HERWIEGO_SEMANTIC_CACHE", "1") != "0",
+        sem_threshold=float(env("HERWIEGO_SEM_THRESHOLD", "0.86")),
+        sem_threshold_ask=float(env("HERWIEGO_SEM_THRESHOLD_ASK", "0.93")),
+        quiz_verify=env("HERWIEGO_QUIZ_VERIFY", "1") != "0",
+        max_quota_wait_s=float(env("HERWIEGO_MAX_QUOTA_WAIT_S", "45")),
+        db_path=env("HERWIEGO_DB", "herwiego.db"),
+        secret=env("HERWIEGO_SECRET", "dev-secret-change-me"),
+        live_capacity=int(env("HERWIEGO_LIVE_CAPACITY", "200")),
+        env=env("HERWIEGO_ENV", "development").strip().lower(),
+        log_level=env("HERWIEGO_LOG_LEVEL", "INFO"),
+        trust_proxy=env("HERWIEGO_TRUST_PROXY", "0") == "1",
+        user_ai_per_min=int(env("HERWIEGO_USER_AI_PER_MIN", "20")),
+        login_attempts=int(env("HERWIEGO_LOGIN_ATTEMPTS", "8")),
+        register_per_hour=int(env("HERWIEGO_REGISTER_PER_HOUR", "15")),
+        video_capacity=int(env("HERWIEGO_VIDEO_CAPACITY", "9")),
+        event_lead_s=int(env("HERWIEGO_EVENT_LEAD_S", "300")),
+        event_min_players=int(env("HERWIEGO_EVENT_MIN_PLAYERS", "2")),
     )
     settings = dataclasses.replace(settings, **overrides) if overrides else settings
-    problems = settings.production_problems()
+    problems = settings.startup_problems()
     if problems:
-        raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
+        raise RuntimeError("Refusing to start: " + "; ".join(problems))
     return settings

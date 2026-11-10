@@ -182,57 +182,7 @@ export function SoloQuiz({ topic, level, onFinish }) {
   );
 }
 
-const STYLE_TEXT = {
-  visual: tx("You tend to learn best from pictures and diagrams. Explanations will lean on the figure."),
-  stepwise: tx("You tend to learn best step by step. Explanations will be broken into small ordered steps."),
-  analogy: tx("You tend to learn best through comparisons. Explanations will start from an everyday example."),
-  practice: tx("You tend to learn best by trying things. Explanations will be short and push you to practise."),
-  repetition: tx("You tend to learn best with repetition. Key rules will be restated in more than one way."),
-  balanced: tx("No single style stood out, so explanations will mix a definition, an example and a figure."),
-};
 export const STYLE_NAME = { visual: tx("visual"), stepwise: tx("step by step"), analogy: tx("by comparison"), practice: tx("by practice"), repetition: tx("by repetition"), balanced: tx("balanced") };
-
-export function Diagnostic({ onDone }) {
-  const t = useT();
-  const { lang } = useLang();
-  const [qs, setQs] = useState(null);
-  const [answers, setAnswers] = useState([]);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => { api("/api/study/diagnostic").then((d) => setQs(d.questions)).catch(setError); }, [lang]);
-  const pick = async (idx) => {
-    const next = [...answers, idx];
-    setAnswers(next);
-    if (next.length === qs.length) {
-      try { setResult(await api("/api/study/diagnostic", { method: "POST", body: { answers: next } })); } catch (e) { setError(e); }
-    }
-  };
-
-  if (error) return <ErrorNote error={error} />;
-  if (!qs) return <p className="muted">{t("Loading questions…")}</p>;
-  if (result)
-    return (
-      <section className="panel diag">
-        <h2>{t("Your learning style: {style}", { style: t(STYLE_NAME[result.learning_style] || STYLE_NAME.balanced) })}</h2>
-        <p>{t(STYLE_TEXT[result.learning_style] || STYLE_TEXT.balanced)}</p>
-        <p className="muted small">{t("This adapts how EdNova explains things. It stays on your account and you can retake it any time.")}</p>
-        <button className="btn primary" onClick={() => onDone(result.learning_style)}>{t("Start studying")}</button>
-      </section>
-    );
-  if (answers.length >= qs.length) return <p className="muted" role="status">{t("Working out your learning style…")}</p>;
-  const q = qs[answers.length];
-  return (
-    <section className="panel diag">
-      <h2>{t("Four quick questions so EdNova explains the way you learn")}</h2>
-      <p className="muted small">{t("Question {i} of {n}.", { i: answers.length + 1, n: qs.length })} {t("There are no wrong answers.")}</p>
-      <p className="question">{q.q}</p>
-      <ul className="options">
-        {q.options.map((o, n) => <li key={n}><button className="option" onClick={() => pick(n)}>{o}</button></li>)}
-      </ul>
-    </section>
-  );
-}
 
 export function ProgressPanel({ refreshKey }) {
   const t = useT();
@@ -262,6 +212,106 @@ export function ProgressPanel({ refreshKey }) {
             </li>
           ))}
         </ul>
+      )}
+    </section>
+  );
+}
+
+const RULE_LABEL = {
+  signup: tx("Welcome bonus"), daily_login: tx("Daily visit"), streak: tx("Day streak bonus"),
+  explain: tx("Explanation studied"), quiz_correct: tx("Correct quiz answer"), quiz_perfect: tx("Perfect quiz"),
+  group_quiz: tx("Correct answer in a study room"), resume: tx("Revision sheet"), review_card: tx("Flashcard reviewed"),
+  game: tx("Break game"), pocket_tree: tx("Pocket tree grown"),
+};
+
+/** The account score (GET /api/score/me): level, progress to the next one, rank, latest points, and the leaderboard. */
+export function ScorePanel({ refreshKey }) {
+  const t = useT();
+  const [s, setS] = useState(null);
+  const [period, setPeriod] = useState("week");
+  const [board, setBoard] = useState(null);
+  useEffect(() => { api("/api/score/me").then(setS).catch(() => {}); }, [refreshKey]);
+  useEffect(() => { api(`/api/score/leaderboard?period=${period}`).then(setBoard).catch(() => {}); }, [period, refreshKey]);
+  if (!s) return null;
+  const label = (rule) => t(RULE_LABEL[rule] || rule);
+  return (
+    <section className="panel score-panel">
+      <div className="score-head">
+        <div>
+          <h3>{t("Your score")}</h3>
+          <p className="muted small">{s.rank ? t("Rank #{n} overall", { n: s.rank }) : t("No points yet")}</p>
+        </div>
+        <span className="level-badge" aria-label={t("Level {n}", { n: s.level })}>{t("Level {n}", { n: s.level })}</span>
+      </div>
+      <p className="score-total"><strong>{s.total}</strong> {t("points")}</p>
+      <div className="meter level-meter" role="img" aria-label={s.next ? t("{n} points to the next level", { n: s.next - s.total }) : t("Top level")}>
+        <i style={{ width: `${Math.round(s.progress * 100)}%` }} />
+      </div>
+      <p className="muted small">{s.next ? t("{n} points to the next level", { n: s.next - s.total }) : t("Top level")}
+        {" · "}{t("+{n} today", { n: s.today })}</p>
+      {s.recent.length > 0 && (
+        <ul className="score-recent">
+          {s.recent.slice(0, 5).map((r, i) => <li key={i}><span>{label(r.rule)}</span><b>+{r.points}</b></li>)}
+        </ul>
+      )}
+      <div className="board-head">
+        <h4>{t("Leaderboard")}</h4>
+        <div className="row">
+          <button className={`chip${period === "week" ? " on" : ""}`} onClick={() => setPeriod("week")}>{t("This week")}</button>
+          <button className={`chip${period === "all" ? " on" : ""}`} onClick={() => setPeriod("all")}>{t("All time")}</button>
+        </div>
+      </div>
+      {board && (board.top.length === 0
+        ? <p className="muted small">{t("No points yet")}</p>
+        : <ol className="leaderboard">
+            {board.top.map((r) => (
+              <li key={r.pseudo} className={r.pseudo === board.you.pseudo ? "me" : ""}>
+                <span className="rank">{r.rank}</span><span className="who">{r.pseudo}</span><b>{r.score}</b>
+              </li>
+            ))}
+            {board.you.rank > board.top.length && (
+              <li className="me"><span className="rank">{board.you.rank}</span><span className="who">{board.you.pseudo}</span><b>{board.you.score}</b></li>
+            )}
+          </ol>)}
+    </section>
+  );
+}
+
+/** On-demand recap of everything the learner has studied (POST /api/study/resume). Used in solo study and the live-room notepad. */
+export function RevisionSheet({ reloadKey }) {
+  const t = useT();
+  const [sheet, setSheet] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const generate = async () => {
+    setBusy(true); setError(null);
+    try {
+      const data = await api("/api/study/resume", { method: "POST" });
+      setSheet(data.sheet);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const lines = (sheet || "").split("\n").filter((l) => l.trim());
+  return (
+    <section className="panel sheet-panel">
+      <h3>{t("Revision sheet")}</h3>
+      <p className="muted small">{t("A quick recap of everything you've studied, built on demand.")}</p>
+      <button className="btn small" onClick={generate} disabled={busy}>
+        {busy ? t("Building…") : sheet ? t("Rebuild") : t("Generate revision sheet")}
+      </button>
+      {error && <ErrorNote error={error} onRetry={generate} />}
+      {sheet && (
+        <div className="revision-body" data-testid="sheet">
+          {lines.map((l, i) => l.startsWith("## ")
+            ? <h4 key={i}>{l.slice(3)}</h4>
+            : l.startsWith("- ") ? <p key={i} className="revision-pt">• {l.slice(2)}</p>
+            : <p key={i}>{l}</p>)}
+        </div>
       )}
     </section>
   );

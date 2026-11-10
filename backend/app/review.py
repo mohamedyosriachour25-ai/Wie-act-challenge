@@ -8,7 +8,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from . import security
+from . import scoring, security
 from .ai import pipeline
 from .auth import current_user
 from .i18n import lang_of, tr
@@ -106,6 +106,8 @@ def grade(body: GradeBody, request: Request):
     upd = schedule(dict(card), GRADES[body.grade], time.time())
     db.execute("UPDATE cards SET ease=?, reps=?, lapses=?, interval_days=?, due_at=? WHERE id=?",
                (upd["ease"], upd["reps"], upd["lapses"], upd["interval_days"], upd["due_at"], body.id))
+    scoring.track(db, user["id"], "review", {"card": body.id, "grade": body.grade})
+    scoring.award(db, user["id"], "review_card", ref=str(body.id))
     return {"ok": True, "interval_days": upd["interval_days"]}
 
 

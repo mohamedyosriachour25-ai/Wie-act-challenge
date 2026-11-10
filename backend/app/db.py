@@ -91,7 +91,6 @@ LIVE_ROOMS = [
     ("LIVE-DEEP", "Deep work", "Quiet focus, no chat. Reactions only.", 25, 5),
     ("LIVE-LONG", "Long sessions", "Longer blocks for heavy reading and problem sets.", 50, 10),
     ("LIVE-SPRINT", "Sprints", "Short bursts when motivation is low.", 15, 3),
-    ("LIVE-FOREST", "Study forest", "Keep the tab open to grow a tree. Leave and it wilts. Invite friends with the QR code.", 25, 5),
     ("LIVE-DEMO", "Quick demo", "A fast one-minute cycle to try focus, breaks and group games.", 1, 1),
 ]
 
@@ -115,6 +114,8 @@ class DB:
                 self.conn.execute("ALTER TABLE rooms ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
                 self.conn.execute("ALTER TABLE rooms ADD COLUMN summary_at REAL NOT NULL DEFAULT 0")
             self.conn.commit()
+        from . import scoring          # tracking + score ledger (activity, points, users.last_seen/login_count)
+        scoring.init(self)
 
     def execute(self, sql: str, params: tuple = ()):
         with self._lock:
@@ -141,6 +142,8 @@ class DB:
 
     def seed_live_rooms(self, capacity: int) -> None:
         base = time.time()
+        # Every live room now carries its own forest (pocket trees), so the old stand-alone forest room goes.
+        self.execute("DELETE FROM rooms WHERE code='LIVE-FOREST' AND kind='live'")
         for i, (code, name, topic, focus, brk) in enumerate(LIVE_ROOMS):
             self.execute(
                 "INSERT OR IGNORE INTO rooms (code, kind, name, topic, capacity, is_public, focus_min, break_min, created_at)"

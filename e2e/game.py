@@ -1,6 +1,6 @@
 import os, time, random, json, urllib.request
 from playwright.sync_api import sync_playwright
-BASE=os.environ.get("EDNOVA_BASE","http://127.0.0.1:8000"); SHOTS=os.environ.get("EDNOVA_SHOTS","shots")
+BASE=os.environ.get("HERWIEGO_BASE","http://127.0.0.1:8000"); SHOTS=os.environ.get("HERWIEGO_SHOTS","shots")
 problems=[]
 def check(n,c,e=""):
     print(("PASS " if c else "FAIL ")+n+(f"  {e}" if e else ""))
@@ -15,7 +15,7 @@ while time.time()<budget:
     if x<FOCUS and (FOCUS-x)<=LEAD and (FOCUS-x)>18: break
     time.sleep(1)
 with sync_playwright() as p:
-    br=p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None,args=["--no-sandbox","--use-fake-device-for-media-stream","--use-fake-ui-for-media-stream"])
+    br=p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None,args=["--no-sandbox","--use-fake-device-for-media-stream","--use-fake-ui-for-media-stream"])
     ca=br.new_context(viewport={"width":1100,"height":1000},permissions=["camera","microphone"])
     cb=br.new_context(viewport={"width":1100,"height":1000},permissions=["camera","microphone"])
     a=ca.new_page(); b=cb.new_page()
@@ -32,24 +32,25 @@ with sync_playwright() as p:
     a.screenshot(path=f"{SHOTS}/game-pick.png")
     # wait for break + the server pre-roll
     while into()<FOCUS+1: time.sleep(0.5)
-    a.wait_for_selector(".turn-game", timeout=15000)
-    b.wait_for_selector(".turn-game", timeout=15000)
-    check("turn-based game renders", a.locator(".turn-game").count()==1)
-    # within the first turn, exactly one of them is the performer (has the stage button)
-    time.sleep(6)
+    a.wait_for_selector(".game-stage", timeout=15000)
+    b.wait_for_selector(".game-stage", timeout=15000)
+    check("the game takes the middle of the room", a.locator(".game-stage").count()==1 and a.locator(".stage").count()==0)
+    # after the prep time (20 s in short-break rooms), exactly one of them is the performer (has the stage button)
+    for pg in (a, b): pg.wait_for_function("() => /Your turn|is playing/.test(document.querySelector('.game-stage .turn-clock')?.textContent || '')", timeout=40000)
     perf_a = a.get_by_role("button",name="Go on stage (camera + mic)").count()==1
     perf_b = b.get_by_role("button",name="Go on stage (camera + mic)").count()==1
     check("one player is the performer (stage + mic button)", perf_a != perf_b)
     performer, watcher = (a,b) if perf_a else (b,a)
-    check("performer sees their turn + a prompt", "Your turn" in performer.locator(".turn-game").inner_text() or "turn" in performer.locator(".turn-game").inner_text().lower())
-    wtext = watcher.locator(".turn-game").inner_text()
-    low = wtext.lower()
-    check("watcher sees who is on stage / next only", ("next" in low or "on stage" in low or "get ready" in low))
-    # performer can actually go on stage (camera+mic)
+    check("performer sees their turn + a prompt", "Your turn" in performer.locator(".turn-clock").inner_text())
+    check("watcher sees who is playing now", "is playing" in watcher.locator(".turn-clock").inner_text())
     performer.get_by_role("button",name="Go on stage (camera + mic)").click()
-    performer.wait_for_selector(".vtile", timeout=8000)
-    check("performer goes on stage with a video tile", performer.locator(".vtile").count()>=1)
+    performer.wait_for_selector(".game-focus .vtile", timeout=8000)
+    check("performer goes on stage, centre", performer.locator(".game-focus .vtile").count()==1)
+    watcher.wait_for_selector(".game-focus .vtile video", timeout=15000)
+    watcher.wait_for_function("() => { const v = document.querySelector('.game-focus .vtile video'); return !!v && v.videoWidth > 0; }", timeout=15000)
+    check("the watcher sees the performer's camera centre stage, own camera off", watcher.locator(".game-focus .vtile").count()==1)
     performer.screenshot(path=f"{SHOTS}/game-turn.png", full_page=True)
+    watcher.screenshot(path=f"{SHOTS}/game-watch.png", full_page=True)
 
     # ---- mime guessing: the watcher types the word in the chat, the performer's client judges it
     prompt = performer.locator(".prompt-big").inner_text()       # e.g. "Act out: a cat"

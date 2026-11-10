@@ -2,15 +2,15 @@ import random, json
 from playwright.sync_api import sync_playwright
 
 import os
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
 problems = []
 def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  {extra}" if extra else ""), flush=True)
     if not cond: problems.append(name)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=["--no-sandbox"])
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=["--no-sandbox"])
     ctx = br.new_context(viewport={"width": 1280, "height": 900}); page = ctx.new_page()
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
     page.goto(BASE); page.wait_for_selector(".hero")
@@ -35,9 +35,8 @@ with sync_playwright() as p:
     page.get_by_role("button", name="إنشاء الحساب").click()
     page.wait_for_selector(".progress")
     page.get_by_role("link", name="الدراسة الفردية").first.click()
-    page.wait_for_selector(".diag")
-    page.get_by_role("button", name="تخطَّ الآن").click()
-    page.get_by_role("button", name="نظرية طالس").click()
+    page.wait_for_selector(".welcome")
+    page.locator(".composer input").fill("نظرية طالس"); page.locator(".composer .send").click()
     page.wait_for_selector(".explain", timeout=20000); page.wait_for_timeout(500)
     txt = page.locator(".explain").inner_text()
     check("ar: figure forced LTR", page.evaluate("getComputedStyle(document.querySelector('.explain .sheet svg')).direction") == "ltr")

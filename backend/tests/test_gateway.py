@@ -1,13 +1,12 @@
 """The gateway against the fake service: each test is one row of the guide's error contract."""
 import asyncio
 
-import httpx
 import pytest
-from fastapi import FastAPI
 
 from app.ai.gateway import AIError, Gateway
-from app.ai.mock_api import build_mock
 from app.config import Settings
+
+from ._fake_service import build_fake
 
 pytestmark = pytest.mark.anyio
 
@@ -18,11 +17,9 @@ def anyio_backend():
 
 
 def make(**over):
-    s = Settings(mock_latency_scale=0.0, max_quota_wait_s=10, **over)
-    app = FastAPI()
-    router, state = build_mock(s)
-    app.include_router(router)
-    return Gateway(s, httpx.ASGITransport(app=app)), state
+    s = Settings(base_url="http://fake-ai.test", api_key="test-key", max_quota_wait_s=10, **over)
+    transport, state = build_fake({s.compact_model: "compact", s.mid_model: "mid"})
+    return Gateway(s, transport), state
 
 
 MSG = [{"role": "system", "content": "TASK: route\n"}, {"role": "user", "content": "TOPIC: Thales theorem"}]
@@ -96,7 +93,7 @@ async def test_chat_json_returns_none_instead_of_crashing_on_garbage():
 
 async def test_unknown_model_is_an_error_not_a_hang():
     gw, _ = make(compact_model="compact-1b")
-    gw.s = Settings(mock_latency_scale=0.0, compact_model="nope")
+    gw.s = Settings(base_url="http://fake-ai.test", api_key="test-key", compact_model="nope")
     with pytest.raises(AIError):
         await gw.chat("route", "compact", MSG, max_tokens=100)
 

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from . import materials, security
+from . import games, materials, scoring, security
 from .ai import pipeline
 from .ai.gateway import AIError
 from .auth import current_user, user_from_token
@@ -32,11 +32,17 @@ router = APIRouter(tags=["rooms"])
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 REACTIONS = ("👏", "🔥", "💡", "☕")
 GAME_SLOT_S = 25          # seconds per trivia question (matches the client's break trivia slot)
-TURN_S = 30               # seconds each player gets in a turn-based game
-PREROLL_S = 4             # a short "get ready, next up" before the first turn
+TURN_S = 30               # seconds each player gets in a turn-based game when the break is short
+TURN_LONG_S = 60          # ...and when the room has a long (10-minute) break, e.g. the 50/10 room
+LONG_BREAK_MIN = 10       # a break this long or longer gives each player TURN_LONG_S
+FIRST_PREP_S = 20         # short breaks: extra time before the first turn so the first player can prepare
+PREROLL_S = 4             # long breaks: a short "get ready" before the first turn
+TURN_GAP_S = 2            # a breath between turns, while the word just played is revealed
+MIN_TURN_S = 8            # a last turn shorter than this is not started (the break is about to end)
+MAX_SWAPS = 3             # word changes a player may ask for per round
 GROUP_GAMES = ("trivia_race", "mime", "pictionary")   # games a player can choose for the break
 TURN_GAMES = ("mime", "pictionary")                    # server-driven, one performer at a time
-GUESS_GAMES = ("mime", "pictionary")                   # the performer's client judges chat guesses
+GUESS_GAMES = ("mime", "pictionary")                   # the server judges chat guesses against each player's word
 CLOCK_GAMES = ("trivia_race",)                          # client derives the schedule from the shared clock; server scores
 TREE_GRACE_S = 30         # time a tree survives with its owner away per focus session (short rooms: a quarter of the focus time)
 TREE_MIN_S = 120          # a tree is only planted if at least this much focus time is left (short rooms: half the focus time)
@@ -46,7 +52,6 @@ TREE_TICK_S = 4           # while someone is in a forest, trees are advanced and
 TREE_FULL_S = 180         # focused seconds for a tree to look full-grown; it is still only PLANTED at the end of the
 #                           focus phase, so a long phase means "grow it in a few minutes, then keep it alive".
 FOREST_LOG = 200          # planted/wilted trees remembered per room (in memory, like all Live state)
-PROMPT_COUNT = {"mime": 8, "pictionary": 8}            # the client holds the localized prompt text; the server sends an index
 
 
 @dataclass
@@ -63,6 +68,7 @@ class Member:
     last_reaction: float = 0.0
     lang: str = "en"
     in_video: bool = False  # has the camera turned on in a Live room (mesh WebRTC)
+    watch_only: bool = False  # in the mesh only to watch (mime audience), sending no video
     forest: bool = False    # has opened the study-forest view of this Live room
 
 
@@ -101,6 +107,7 @@ class Room:
         self.qa_log: list[dict] = []   # shared answers from the room's material
         self.events: dict[int, dict] = {}        # live group games, keyed by pomodoro cycle index
         self.game_tasks: dict[str, asyncio.Task] = {}  # one turn-game driver per chosen game in the current break
+        self.game_content: dict[int, asyncio.Task] = {}  # per cycle: words + trivia for that break (AI or built-in bank)
         self.summary = row["summary"] if "summary" in row.keys() else ""
         self.summary_at = row["summary_at"] if "summary_at" in row.keys() else 0.0
         self._presence_task: asyncio.Task | None = None
@@ -182,7 +189,7 @@ class Room:
             tracked = [m for m in members if m.focused is not None]
             rows = []
             for m in members[:40]:
-                row = {"pseudo": m.pseudo, "focused": m.focused}
+                row = {"pseudo": m.pseudo, "focused": m.focused, "video": m.in_video and not m.watch_only}
                 view = self.tree_view(m.user_id, cyc)
                 if view:
                     row["tree"] = view
@@ -239,6 +246,14 @@ class Hub:
     def online(self, code: str) -> int:
         room = self.rooms.get(code)
         return len(room.members) if room else 0
+
+
+def bank_game_points(member: "Member", user_id: int, game_points: int, game: str) -> None:
+    """Break-game points also count toward the account score: 1 score point per 10 game points (daily cap)."""
+    try:
+        scoring.award(member.ws.app.state.db, user_id, "game", units=game_points // 10, ref=game)
+    except Exception:    # scoring must never break a game
+        pass
 
 
 def log_message(app, code: str, kind: str, author: str, text: str) -> None:
@@ -366,6 +381,23 @@ def create_room(body: CreateRoom, request: Request):
     return _row_out(request, db.one("SELECT code, kind, name, topic, capacity, focus_min, break_min FROM rooms WHERE code=?", (code,)))
 
 
+@router.get("/api/rooms/mine")
+def my_rooms(request: Request):
+    """Study rooms the signed-in user created or spoke in, newest activity first — the live-room notepad's
+    "My study rooms" tab. Declared before /api/rooms/{code} so "mine" is never read as a room code."""
+    user = current_user(request)
+    rows = request.app.state.db.all(
+        """SELECT r.code, r.name, r.topic, r.summary,
+                  COALESCE((SELECT MAX(created_at) FROM room_messages m WHERE m.code = r.code), r.created_at) AS last_at
+           FROM rooms r
+           WHERE r.kind = 'group' AND (r.owner_id = ? OR EXISTS
+                 (SELECT 1 FROM room_messages m WHERE m.code = r.code AND m.author = ?))
+           ORDER BY last_at DESC LIMIT 20""",
+        (user["id"], user["pseudo"]),
+    )
+    return {"rooms": [{**r, "summary": (r["summary"] or "")[:600]} for r in rows]}
+
+
 @router.get("/api/rooms/{code}")
 def get_room(code: str, request: Request):
     row = request.app.state.db.one(
@@ -424,6 +456,8 @@ async def room_socket(ws: WebSocket, code: str, token: str = ""):
             pass
 
     member = Member(user["id"], user["pseudo"], ws, time.time(), lang=lang)
+    if previous is None:
+        scoring.track(app.state.db, user["id"], "live_join" if room.kind == "live" else "room_join", {"room": room.code})
     if previous is not None:
         member.msgs, member.anon_msgs, member.joined_at = previous.msgs, previous.anon_msgs, previous.joined_at
     room.members[user["id"]] = member
@@ -440,6 +474,8 @@ async def room_socket(ws: WebSocket, code: str, token: str = ""):
             "min_players": s.event_min_players,
         }
         snap["forest"] = room.forest[-60:]   # trees already planted or wilted in this room
+        from .phonetree import room_pocket_trees   # local import: phonetree imports this module
+        snap["pocket_trees"] = room_pocket_trees(room.code)   # everyone's live pocket tree in this room
         cyc = live_cycle(room, time.time())
         if cyc is not None:  # if games for this cycle already have players, send how many picked each
             ev = room.events.get(cyc["cycles"])
@@ -465,9 +501,10 @@ async def room_socket(ws: WebSocket, code: str, token: str = ""):
             room.update_trees(time.time())  # growth up to the moment they left; away time counts from here
             del room.members[user["id"]]
             if not room.members:
-                for tsk in room.game_tasks.values():
+                for tsk in [*room.game_tasks.values(), *room.game_content.values()]:
                     if not tsk.done():
                         tsk.cancel()
+                room.game_content.clear()
             if room._forest_task and not any(m.forest for m in room.members.values()):
                 room._forest_task.cancel()
             schedule_presence(room, 0.2)
@@ -517,14 +554,46 @@ async def broadcast_game(room: Room, sv: dict, payload: dict) -> None:
             await send(m, payload)
 
 
-def _active_turn_subev(room: Room, uid: int) -> dict | None:
-    """Find the turn-game (mime / pictionary) this member is currently performing in, if any."""
-    for ev in room.events.values():
-        for g in TURN_GAMES:
-            sv = ev["games"].get(g)
-            if sv and sv.get("started") and sv.get("current") == uid:
-                return sv
-    return None
+def turn_timing(room: Room) -> tuple[float, float]:
+    """(seconds per player, seconds before the first turn) for this room's break length."""
+    if room.break_min >= LONG_BREAK_MIN:
+        return TURN_LONG_S, PREROLL_S
+    return TURN_S, FIRST_PREP_S
+
+
+def ensure_content(app, room: Room, cycle: int) -> asyncio.Task:
+    """Start generating this break's words and trivia once (compact model, or the built-in bank), in the
+    languages of the people in the room. When ready, every member gets the trivia in their own language."""
+    task = room.game_content.get(cycle)
+    if task is None:
+        break_s = room.timer["break_s"] if room.timer else 300
+        per_turn, _ = turn_timing(room)
+        n_trivia = max(3, min(10, int(break_s // GAME_SLOT_S)))
+        n_words = max(4, min(12, int(break_s // per_turn) + 2))
+        langs = {m.lang for m in room.members.values()}
+
+        async def build():
+            data = await games.make_content(app, langs, n_trivia, n_words)
+            for m in list(room.members.values()):
+                await send(m, content_message(data, cycle, m.lang))
+            return data
+
+        task = room.game_content[cycle] = asyncio.create_task(build())
+        for old in [c for c in room.game_content if c < cycle - 1]:
+            room.game_content.pop(old, None)
+    return task
+
+
+def ready_content(room: Room, cycle: int) -> dict | None:
+    task = room.game_content.get(cycle)
+    if task is None or not task.done() or task.cancelled() or task.exception() is not None:
+        return None
+    return task.result()
+
+
+def content_message(data: dict, cycle: int, lang: str) -> dict:
+    return {"type": "game_content", "cycle": cycle, "trivia": games.localize_trivia(data["trivia"], lang),
+            "source": data["source"]["trivia"]}
 
 
 async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -> None:
@@ -551,6 +620,7 @@ async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -
                 other["optins"].pop(member.user_id, None)
                 other["scores"].pop(member.user_id, None)
         sv = _subev(ev, game)
+        ensure_content(app, room, cycle)              # words + trivia for this break, prepared during the invite
         sv["optins"][member.user_id] = member.pseudo
         sv["scores"].setdefault(member.user_id, {"pseudo": member.pseudo, "score": 0, "correct": 0})
         _prune_events(room, cyc["cycles"])
@@ -580,6 +650,12 @@ async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -
                     old.cancel()
                 room.game_tasks[game] = asyncio.create_task(run_turn_game(app, room, cycle, game, sv))
 
+    elif kind == "game_content":      # a client wants this break's trivia (invite shown or break started)
+        ensure_content(app, room, cycle)
+        ready = ready_content(room, cycle)
+        if ready is not None:
+            await send(member, content_message(ready, cycle, member.lang))
+
     elif kind == "game_result":       # clock-driven games (trivia race)
         ev = room.events.get(cycle)
         game = data.get("game") if data.get("game") in CLOCK_GAMES else "trivia_race"
@@ -588,6 +664,10 @@ async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -
             return
         rnd = data.get("round")
         correct = bool(data.get("correct"))
+        content = ready_content(room, cycle)
+        pick = data.get("pick")
+        if content and content["trivia"] and isinstance(rnd, int) and isinstance(pick, int):
+            correct = pick == content["trivia"][rnd % len(content["trivia"])]["a"]   # the server holds the answers
         try:
             ms = max(0.0, float(data.get("ms", GAME_SLOT_S * 1000)))
         except (TypeError, ValueError):
@@ -600,68 +680,224 @@ async def handle_event(app, room: Room, member: Member, kind: str, data: dict) -
         if correct:
             bonus = round(50 * max(0.0, 1 - ms / (GAME_SLOT_S * 1000)))
             rec["score"] += 100 + bonus
+            bank_game_points(member, member.user_id, 100 + bonus, game)
             rec["correct"] += 1
         await broadcast_game(room, sv, {"type": "event_scores", "cycle": cycle, "game": game, "leaderboard": _leaderboard(sv)})
 
 
+class _BreakOver(Exception):
+    """The break has no room for another turn."""
+
+
+def break_left(room: Room, now: float) -> float:
+    """Seconds left in this room's break (patched in tests)."""
+    cyc = live_cycle(room, now)
+    if not cyc or cyc["phase"] != "break" or not room.timer:
+        return 0.0
+    return max(0.0, room.timer["break_s"] - cyc["into"])
+
+
+def _word_key(word: dict) -> str:
+    return games.normalize(word.get("en") or next(iter(word.values()), ""))
+
+
+def take_word(sv: dict, uid: int) -> dict:
+    """A word for this player that nobody else holds right now and that has not been played this game
+    (once the pool runs dry, any word nobody holds right now)."""
+    held = {_word_key(w) for u, w in sv["words"].items() if u != uid}
+    mine = _word_key(sv["words"][uid]) if uid in sv["words"] else None
+    fresh = [w for w in sv["pool"] if _word_key(w) not in sv["used"] and _word_key(w) not in held and _word_key(w) != mine]
+    if not fresh:
+        fresh = [w for w in sv["pool"] if _word_key(w) not in held and _word_key(w) != mine] or sv["pool"]
+    word = fresh[0]
+    sv["used"].add(_word_key(word))
+    sv["words"][uid] = word
+    return word
+
+
+async def _send_word(room: Room, sv: dict, uid: int, *, now: bool = False) -> None:
+    m = room.members.get(uid)
+    if m is not None:
+        left = MAX_SWAPS - sv["swaps"].get((uid, sv["round_no"]), 0)
+        await send(m, {"type": "game_word", "game": sv["game"], "word": games.localize(sv["words"][uid], m.lang),
+                       "round": sv["round_no"], "swaps_left": left, "now": now})
+
+
+def _players(room: Room, sv: dict) -> list[int]:
+    return [u for u in sv["optins"] if u in room.members]
+
+
 async def run_turn_game(app, room: Room, cycle: int, game: str, sv: dict) -> None:
-    """Turn-based party game (mime / pictionary). Each player performs for TURN_S seconds in a fixed order.
-    Only the *next* player's name is broadcast; the word is sent privately to the performer, who keeps it secret."""
-    import random
-    order = list(sv["optins"].keys())
-    random.shuffle(order)                                   # the order is fixed once, then hidden
-    break_s = room.timer["break_s"] if room.timer else TURN_S
-    max_turns = max(1, int((break_s - PREROLL_S) // TURN_S))
-    order = order[:max_turns]
-    sv["order"] = order
-    n = len(order)
+    """Turn-based party game (mime / pictionary), looped until the break ends: every round all players play once in
+    a fresh random order (never starting with whoever played last), then a new round starts with new words.
+    Everyone always holds their own secret word — distinct from everyone else's, never repeated in a game — so they
+    can prepare (pictionary: a private practice board) and may swap it a few times per round. A turn lasts TURN_S
+    (TURN_LONG_S in long-break rooms), shortened to what is left of the break; it ends early when the performer
+    passes or every other active player has guessed. Guesses are judged on the server (`judge_chat`)."""
+    per_turn, prep = turn_timing(room)
+    deadline = time.time() + break_left(room, time.time())
     pseudo = lambda uid: sv["optins"].get(uid, "?")
     try:
-        await broadcast_game(room, sv, {"type": "game_start", "game": game, "total": n})
-        await broadcast_game(room, sv, {"type": "game_next", "game": game, "pseudo": pseudo(order[0]) if order else None})
-        await asyncio.sleep(PREROLL_S)
-        for i, uid in enumerate(order):
-            prompt_index = random.randrange(PROMPT_COUNT.get(game, 1))
-            sv["current"] = uid            # who is performing now (used to validate guesses)
-            sv["current_round"] = i
-            sv["solved_round"] = None       # one correct guess announced per round
-            if game == "pictionary":
-                sv["strokes"] = []          # a fresh canvas for each performer
-                await broadcast_game(room, sv, {"type": "draw", "op": "clear"})
-            m = room.members.get(uid)
-            if m is not None:
-                # the performer gets their secret prompt; the audience is told only who is next
-                await send(m, {"type": "game_your_turn", "game": game, "round": i, "total": n, "seconds": TURN_S, "prompt_index": prompt_index})
-            nxt = pseudo(order[i + 1]) if i + 1 < n else None
-            await broadcast_game(room, sv, {"type": "game_next", "game": game, "pseudo": nxt, "round": i, "total": n})
-            await asyncio.sleep(TURN_S)
-        await broadcast_game(room, sv, {"type": "game_over", "game": game, "leaderboard": _leaderboard(sv)})
-    except asyncio.CancelledError:
+        try:
+            content = await asyncio.wait_for(asyncio.shield(ensure_content(app, room, cycle)), games.AI_TIMEOUT_S + 3)
+        except Exception:
+            content = None
+        pool, seen = [], set()
+        for w in ((content or {}).get("words", {}).get(game) or []) + random.sample(games.WORDS_FALLBACK[game], len(games.WORDS_FALLBACK[game])):
+            if _word_key(w) and _word_key(w) not in seen:
+                seen.add(_word_key(w)); pool.append(w)
+        sv.update(pool=pool, used=set(), words={}, swaps={}, round_no=0, order=[])
+        order = _players(room, sv)
+        random.shuffle(order)
+        for uid in order:
+            take_word(sv, uid)
+        sv["order"] = order
+        await broadcast_game(room, sv, {"type": "game_start", "game": game, "total": len(order), "order": [pseudo(u) for u in order],
+                                        "per_turn": per_turn, "prep": prep})
+        for uid in order:
+            await _send_word(room, sv, uid)
+        await asyncio.sleep(prep)
+        last = None
+        while True:
+            if sv["round_no"] > 0:                    # a new round: fresh order, never opening with the last performer
+                order = _players(room, sv)
+                random.shuffle(order)
+                if len(order) > 1 and order[0] == last:
+                    order.append(order.pop(0))
+                sv["order"] = order
+                await broadcast_game(room, sv, {"type": "game_round", "game": game, "round": sv["round_no"], "order": [pseudo(u) for u in order]})
+            if not order:
+                break
+            for i, uid in enumerate(order):
+                left = deadline - time.time()
+                if left < MIN_TURN_S:
+                    raise _BreakOver
+                seconds = min(per_turn, left)
+                if uid not in room.members:           # left the room since the round started
+                    continue
+                if uid not in sv["words"]:
+                    take_word(sv, uid)
+                sv["current"] = uid
+                sv["current_round"] = f"{sv['round_no']}.{i}"
+                sv["solved"] = set()
+                sv["turn_started"] = time.time()
+                sv["turn_seconds"] = seconds
+                sv["end_reason"] = None
+                done = sv["turn_done"] = asyncio.Event()
+                if game == "pictionary":
+                    sv["strokes"] = []
+                    await broadcast_game(room, sv, {"type": "draw", "op": "clear"})
+                m = room.members.get(uid)
+                await send(m, {"type": "game_your_turn", "game": game, "round": sv["round_no"], "index": i, "seconds": seconds,
+                               "word": games.localize(sv["words"][uid], m.lang)})
+                await broadcast_game(room, sv, {"type": "game_turn", "game": game, "pseudo": pseudo(uid), "round": sv["round_no"],
+                                                "index": i, "total": len(order), "seconds": seconds,
+                                                "next": pseudo(order[i + 1]) if i + 1 < len(order) else None})
+                try:
+                    await asyncio.wait_for(done.wait(), seconds)
+                except asyncio.TimeoutError:
+                    sv["end_reason"] = sv.get("end_reason") or "time"
+                sv["current"] = None
+                played = sv["words"].pop(uid)
+                for pid in list(sv["optins"].keys()):     # the word is revealed to each player in their language
+                    pm = room.members.get(pid)
+                    if pm is not None:
+                        await send(pm, {"type": "game_turn_end", "game": game, "pseudo": pseudo(uid), "round": sv["round_no"],
+                                        "reason": sv["end_reason"] or "time", "word": games.localize(played, pm.lang),
+                                        "leaderboard": _leaderboard(sv)})
+                take_word(sv, uid)                        # their next word, so they can prepare for the next round
+                await _send_word(room, sv, uid)
+                last = uid
+                await asyncio.sleep(TURN_GAP_S)
+            sv["round_no"] += 1
+    except (asyncio.CancelledError, _BreakOver):
         pass
     finally:
         sv["started"] = False
         sv["current"] = None
+        try:
+            await broadcast_game(room, sv, {"type": "game_over", "game": game, "leaderboard": _leaderboard(sv)})
+        except Exception:
+            pass
 
 
-async def handle_turn_guess(room: Room, member: Member, data: dict) -> None:
-    """In mime / pictionary the performer's own client knows the word, so it judges incoming chat guesses and reports
-    a correct one. The server only confirms the reporter is the active performer, then announces the winner once."""
-    sv = _active_turn_subev(room, member.user_id)
-    if sv is None:
+def _started_turn_subevs(room: Room) -> list[dict]:
+    return [sv for ev in room.events.values() for g in TURN_GAMES
+            if (sv := ev["games"].get(g)) and sv.get("started") and sv.get("words") is not None]
+
+
+async def handle_word_swap(room: Room, member: Member) -> None:
+    """A player finds their word too hard: give them another one (unique, unplayed), a few times per round.
+    During their own turn this only works before anyone has guessed."""
+    for sv in _started_turn_subevs(room):
+        uid = member.user_id
+        if uid not in sv["optins"] or uid not in sv["words"]:
+            continue
+        if sv.get("current") == uid and sv.get("solved"):
+            await send(member, {"type": "game_swap_denied", "game": sv["game"], "reason": "guessed"})
+            return
+        key = (uid, sv["round_no"])
+        if sv["swaps"].get(key, 0) >= MAX_SWAPS:
+            await send(member, {"type": "game_swap_denied", "game": sv["game"], "reason": "limit"})
+            return
+        sv["swaps"][key] = sv["swaps"].get(key, 0) + 1
+        take_word(sv, uid)
+        now = sv.get("current") == uid
+        if now and sv["game"] == "pictionary":      # a new word mid-turn: start from a clean board
+            sv["strokes"] = []
+            await broadcast_game(room, sv, {"type": "draw", "op": "clear"})
+        await _send_word(room, sv, uid, now=now)
         return
-    rnd = sv.get("current_round")
-    if sv.get("solved_round") == rnd:          # already announced for this round
-        return
-    guesser = _clean(data.get("pseudo"), 60)
-    winner = next((m for m in room.members.values() if m.pseudo == guesser), None)
-    if winner is None or winner.user_id == member.user_id or winner.user_id not in sv["optins"]:
-        return
-    sv["solved_round"] = rnd
-    rec = sv["scores"].setdefault(winner.user_id, {"pseudo": winner.pseudo, "score": 0, "correct": 0})
-    rec["score"] += 100
-    rec["correct"] += 1
-    await broadcast_game(room, sv, {"type": "game_guessed", "game": sv["game"], "pseudo": guesser,
-                                    "by": member.pseudo, "round": rnd, "leaderboard": _leaderboard(sv)})
+
+
+def _live_turn_subevs(room: Room) -> list[dict]:
+    """Turn games with someone performing right now."""
+    return [sv for ev in room.events.values() for g in TURN_GAMES
+            if (sv := ev["games"].get(g)) and sv.get("started") and sv.get("current") is not None]
+
+
+async def judge_chat(room: Room, member: Member, text: str) -> str:
+    """Check a live-room chat line against the word being performed. Returns 'pass' (send it as is),
+    'hide' (a correct guess: scored, announced, never shown) or 'blur' (a near miss, or the word itself
+    from someone who cannot score: everyone else sees it blurred)."""
+    for sv in _live_turn_subevs(room):
+        word = sv.get("words", {}).get(sv["current"])
+        if not word:
+            continue
+        verdict = games.judge(text, word)
+        if verdict is None:
+            continue
+        playing = member.user_id in sv["optins"] and member.user_id != sv["current"]
+        if verdict == "exact" and playing and member.user_id not in sv["solved"]:
+            sv["solved"].add(member.user_id)
+            per_turn, _ = turn_timing(room)
+            speed = max(0.0, 1 - (time.time() - sv.get("turn_started", time.time())) / max(1e-3, sv.get("turn_seconds", per_turn)))
+            rec = sv["scores"].setdefault(member.user_id, {"pseudo": member.pseudo, "score": 0, "correct": 0})
+            rec["score"] += 100 + round(50 * speed)
+            rec["correct"] += 1
+            perf = sv["scores"].setdefault(sv["current"], {"pseudo": sv["optins"].get(sv["current"], "?"), "score": 0, "correct": 0})
+            perf["score"] += 40                     # the performer scores for every player who gets it
+            bank_game_points(member, member.user_id, 100 + round(50 * speed), sv["game"])
+            bank_game_points(member, sv["current"], 40, sv["game"])
+            await broadcast_game(room, sv, {"type": "game_guessed", "game": sv["game"], "pseudo": member.pseudo,
+                                            "round": sv.get("current_round"), "leaderboard": _leaderboard(sv)})
+            guessers = {u for u in sv["optins"] if u != sv["current"] and u in room.members}
+            if guessers and guessers <= sv["solved"]:
+                sv["end_reason"] = "all"
+                sv["turn_done"].set()
+            return "hide"
+        if verdict == "close" and playing:
+            await send(member, {"type": "game_close", "game": sv["game"]})
+        return "blur"
+    return "pass"
+
+
+async def handle_turn_pass(room: Room, member: Member) -> None:
+    """The performer gives up their turn: it ends now and the next player is up."""
+    for sv in _live_turn_subevs(room):
+        if sv["current"] == member.user_id:
+            sv["end_reason"] = "pass"
+            sv["turn_done"].set()
 
 
 DRAW_MAX_OPS = 4000       # cap the per-turn stroke buffer so a long drawing cannot grow memory without bound
@@ -729,16 +965,21 @@ async def handle_draw(room: Room, member: Member, data: dict) -> None:
 async def handle_rtc(app, room: Room, member: Member, kind: str, data: dict) -> None:
     """Relay WebRTC signalling for the camera wall. The media is peer to peer; only these messages pass here."""
     if kind == "rtc_join":
-        if member.in_video:
+        if member.in_video:                      # already in the mesh: a watcher who now turns their camera on
+            if member.watch_only and not data.get("watch"):
+                member.watch_only = False
+                schedule_presence(room, 0.3)
             return
         peers = video_members(room)
         if len(peers) >= app.state.settings.video_capacity:
             await send(member, {"type": "rtc_full", "capacity": app.state.settings.video_capacity})
             return
         member.in_video = True
+        member.watch_only = bool(data.get("watch"))   # receives the others' video without sending any (mime audience)
         await send(member, {"type": "rtc_peers", "peers": [{"id": m.user_id, "pseudo": m.pseudo} for m in peers]})
         for m in peers:  # tell the people already sharing that a new camera joined
             await send(m, {"type": "rtc_peer_join", "id": member.user_id, "pseudo": member.pseudo})
+        schedule_presence(room, 0.3)   # the camera wall shows everyone whose camera is on
 
     elif kind == "rtc_leave":
         await _rtc_drop(room, member)
@@ -753,8 +994,10 @@ async def _rtc_drop(room: Room, member: Member) -> None:
     if not member.in_video:
         return
     member.in_video = False
+    member.watch_only = False
     for m in video_members(room):
         await send(m, {"type": "rtc_peer_leave", "id": member.user_id})
+    schedule_presence(room, 0.3)
 
 
 def _clean(text, limit: int) -> str:
@@ -784,8 +1027,16 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
             text = _clean(data.get("text"), 300)
             if text and now - member.last_chat >= 0.4:
                 member.last_chat = now
-                await broadcast(room, {"type": "chat", "msg": {
-                    "id": f"c{int(now * 1000)}-{member.user_id}", "author": member.pseudo, "text": text, "ts": now}})
+                msg = {"id": f"c{int(now * 1000)}-{member.user_id}", "author": member.pseudo, "text": text, "ts": now}
+                verdict = await judge_chat(room, member, text)
+                if verdict == "pass":
+                    await broadcast(room, {"type": "chat", "msg": msg})
+                elif verdict == "blur":     # the author sees their own line; everyone else a blurred bar of its length
+                    await send(member, {"type": "chat", "msg": {**msg, "close": True}})
+                    hidden = {**msg, "text": "", "blur": True, "len": len(text)}
+                    for o in list(room.members.values()):
+                        if o is not member:
+                            await send(o, {"type": "chat", "msg": hidden})
         elif kind == "forest_join":
             member.forest = True
             ensure_forest_task(room)
@@ -801,13 +1052,15 @@ async def handle(app, room: Room, member: Member, data: dict) -> None:
                 await send(member, payload)                      # echo to the sender's own thread
                 if dest is not None and dest is not member:
                     await send(dest, payload)
-        elif kind in ("mime_guess", "turn_guess"):
-            await handle_turn_guess(room, member, data)
+        elif kind == "turn_pass":
+            await handle_turn_pass(room, member)
+        elif kind == "word_swap":
+            await handle_word_swap(room, member)
         elif kind == "draw":
             await handle_draw(room, member, data)
         elif kind in ("rtc_join", "rtc_leave", "rtc_signal"):
             await handle_rtc(app, room, member, kind, data)
-        elif kind in ("event_optin", "event_optout", "event_start", "game_result"):
+        elif kind in ("event_optin", "event_optout", "event_start", "game_result", "game_content"):
             await handle_event(app, room, member, kind, data)
         return
 
@@ -987,5 +1240,7 @@ async def reveal(app, room: Room) -> None:
             "INSERT INTO events (user_id, ts, kind, topic, correct, total) VALUES (?, ?, 'group_quiz', ?, ?, ?)",
             (user_id, time.time(), room.topic[:160], correct, len(room.quiz)),
         )
+        scoring.track(app.state.db, user_id, "group_quiz", {"room": room.code, "correct": correct, "total": len(room.quiz)})
+        scoring.award(app.state.db, user_id, "group_quiz", units=correct, ref=room.code)
     room.results = {"questions": per_q, "scores": sorted(scores, key=lambda s: -s["correct"])}
     await broadcast(room, {"type": "quiz_results", "results": room.results})

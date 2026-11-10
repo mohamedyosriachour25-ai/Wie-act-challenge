@@ -73,7 +73,7 @@ export default function DrawBoard({ editable, send, drawRef }) {
   const down = (e) => {
     if (!editable) return;
     e.preventDefault();
-    canvas.current.setPointerCapture?.(e.pointerId);
+    try { canvas.current.setPointerCapture?.(e.pointerId); } catch { /* pointer already gone: draw without capture */ }
     drawing.current = true;
     pts.current = [at(e)];
     sentTo.current = 0;

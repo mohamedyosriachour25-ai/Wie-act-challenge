@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../lib/auth.jsx";
 import { useT } from "../lib/i18n.jsx";
 import { AuthCard, Dots } from "../components/Common.jsx";
-import { ProgressPanel } from "../components/Study.jsx";
+import { ProgressPanel, ScorePanel } from "../components/Study.jsx";
 import VisualSheet from "../visuals/VisualSheet.jsx";
 
 const HERO = { template: "thales", params: { ratio: 0.5, labels: ["A", "B", "C"], right_angle: false } };
@@ -16,7 +16,7 @@ export default function Home() {
         <div className="hero-text">
           <h1>{t("Every explanation comes with a picture you can move.")}</h1>
           <p className="lead">
-            {t("Ask about a topic. EdNova explains it in short steps and draws it beside the text, so you can drag it, test it and see why it works. Study alone, with friends, or in a quiet room full of people doing the same.")}
+            {t("Ask about a topic. HerwieGO explains it in short steps and draws it beside the text, so you can drag it, test it and see why it works. Study alone, with friends, or in a quiet room full of people doing the same.")}
           </p>
           <div className="row wrap">
             <Link className="btn primary big" to="/study">{t("Start studying")}</Link>
@@ -55,7 +55,7 @@ export default function Home() {
           </ul>
         </div>
         <aside>
-          {ready && (user ? <ProgressPanel /> : <AuthCard note={t("A pseudo and a password. No e-mail, no real name.")} />)}
+          {ready && (user ? <><ProgressPanel /><ScorePanel /></> : <AuthCard note={t("A pseudo and a password. No e-mail, no real name.")} />)}
         </aside>
       </section>
     </>

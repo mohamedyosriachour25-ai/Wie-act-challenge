@@ -1,6 +1,6 @@
 import os, random, json
 from playwright.sync_api import sync_playwright
-BASE=os.environ.get("EDNOVA_BASE","http://127.0.0.1:8000"); SHOTS=os.environ.get("EDNOVA_SHOTS","shots")
+BASE=os.environ.get("HERWIEGO_BASE","http://127.0.0.1:8000"); SHOTS=os.environ.get("HERWIEGO_SHOTS","shots")
 problems=[]
 def check(n,c,e=""):
     print(("PASS " if c else "FAIL ")+n+(f"  {e}" if e else ""))
@@ -13,11 +13,11 @@ def poll(pg,expr,ms=8000):
         pg.wait_for_timeout(200)
     return False
 with sync_playwright() as p:
-    br=p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None,args=["--no-sandbox"])
+    br=p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None,args=["--no-sandbox"])
     ctx=br.new_context(viewport={"width":1100,"height":1000}); pg=ctx.new_page()
     pg.on("pageerror",lambda e:problems.append(f"pageerror: {e}"))
     pg.goto(BASE+"/study"); reg(pg,f"rv{random.randint(1000,9999)}")
-    pg.wait_for_selector(".diag"); pg.get_by_role("button",name="Skip for now").click()
+    pg.wait_for_selector(".welcome")
     # explain a topic, then take the quiz
     pg.get_by_label("What do you want to understand?").fill("Thales theorem")
     pg.get_by_role("button",name="Explain it").click()

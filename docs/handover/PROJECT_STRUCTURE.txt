@@ -1,12 +1,12 @@
-EdNova — project directory tree (annotated)
+HerwieGO — project directory tree (annotated)
 Generated 2026-11-08 from the actual repository.
 Excluded from this tree: backend/venv, frontend/node_modules, frontend/dist (build output),
 __pycache__, .pytest_cache, *.db, .git. Those are generated or secret and are not committed.
 
-ednova/
+herwiego/
 ├── README.md                     Run / connect-real-service / architecture notes (authoritative quickstart)
 ├── Dockerfile                    2-stage build: node builds the SPA, python serves it (one image)
-├── docker-compose.yml            Single service "ednova"; reads ./.env; EDNOVA_ENV=production
+├── docker-compose.yml            Single service "herwiego"; reads ./.env; HERWIEGO_ENV=production
 ├── .dockerignore / .gitignore    Build/commit exclusions (venv, node_modules, dist, .env, *.db)
 ├── .env.example                  Root env template (used by docker compose)
 ├── .github/workflows/ci.yml      CI: pytest (py3.12/3.13) + i18n:check + vite build + docker build & healthcheck
@@ -18,43 +18,61 @@ ednova/
 │   ├── .env.example              Backend env template (copy to backend/.env for local non-docker runs)
 │   ├── app/
 │   │   ├── __init__.py
-│   │   ├── main.py               ENTRY POINT. create_app(): wires settings, DB, Hub, gateway, routers,
-│   │   │                         mounts built SPA (frontend/dist), /api/health, lifespan (resume indexing).
-│   │   │                         Module-level `app = create_app()` is what uvicorn imports.
+│   │   ├── main.py               ENTRY POINT. create_app(settings, ai_transport=None): wires settings, DB, Hub,
+│   │   │                         gateway, routers, mounts built SPA (frontend/dist), /api/health, lifespan
+│   │   │                         (resume indexing). Module-level `app = create_app()` is what uvicorn imports
+│   │   │                         (logs and sets app=None instead of crashing the import if config is missing).
+│   │   │                         `ai_transport` is a test-only hook (see tests/_fake_service.py); the running
+│   │   │                         app never passes it, so it always talks to the real service over HTTP.
 │   │   ├── config.py             Settings dataclass + load_settings(): ALL config from env (.env auto-loaded).
+│   │   │                         No fallback: startup_problems() requires HERWIEGO_BASE_URL + HERWIEGO_API_KEY in
+│   │   │                         every environment (not just production), and load_settings() raises if missing.
 │   │   ├── db.py                 SQLite wrapper (WAL), SCHEMA (all tables), lightweight migrations, seed_live_rooms.
 │   │   ├── auth.py               Register/login/me. scrypt password hashing; HMAC-signed bearer token. current_user().
 │   │   ├── security.py           Guard middleware, SlidingWindow rate limiter, logging setup, spend_ai(), password checks.
 │   │   ├── i18n.py               Server-side translation catalog (tr()) + lang_of(); FR/AR/Darija for server strings.
+│   │   ├── games.py              Break-game content (AI words + trivia, built-in EN/FR/AR/Darija banks) and the guess judge
 │   │   ├── routes_study.py       Solo study endpoints: diagnostic, explain, hint, quiz(+answer/finish), resume,
-│   │   │                         progress, ai/status, ai/metrics, ai/simulate. log_event() writes to `events`.
+│   │   │                         progress, ai/status, ai/metrics. log_event() writes to `events`.
 │   │   ├── materials.py          RAG: upload (raw body + X-Filename), background indexing, chunking, embeddings,
 │   │   │                         similarity search, /raw blob serving, /ask (grounded answer). Images stored as blobs.
 │   │   ├── review.py             Spaced repetition (SM-2). /api/review add_quiz, due, grade, stats. schedule().
+│   │   ├── scoring.py            User tracking (activity) + score ledger (points): RULES, award(), seen(), levels, /api/score.
 │   │   ├── rooms.py              Group rooms + Live rooms. REST (list/create/get/conversation) + WebSocket /ws/rooms/{code}.
 │   │   │                         Hub (in-memory room registry), Room, Member, presence, chat, DM, WebRTC relay,
 │   │   │                         pomodoro timer, break games (trivia/mime/pictionary), summaries.
+│   │   ├── phonetree.py          Pocket tree: anonymous link-based anti-phone-distraction tree, independent of
+│   │   │                         rooms.py's forest tracking. REST mints a token, WS /ws/phone-tree/{token} ticks
+│   │   │                         the grow/wither state machine and logs into the room's shared forest + alerts
+│   │   │                         the owner's desktop connection on wilt.
 │   │   └── ai/
 │   │       ├── gateway.py        The ONLY code that talks to the inference service. Routing, retries, quota wait,
 │   │       │                     503→compact fallback, concurrency cap, metrics, embeddings. Holds semcache.
 │   │       ├── pipeline.py       Study steps and which model class runs each: explain, hint, get_quiz, ask_material,
 │   │       │                     summarise_session, revision_sheet, public_quiz. Schema validation of model JSON.
 │   │       ├── prompts.py        System/user prompt builders + JSON schemas + few-shot examples per task.
-│   │       ├── visuals.py        Validation/normalisation of illustration specs the model returns.
-│   │       ├── semcache.py       Embeddings-based semantic cache (reuse near-duplicate requests).
-│   │       ├── mock_api.py       Builds the in-process fake inference service (OpenAI-compatible routes).
-│   │       └── mock_llm.py       The fake model: canned, task-aware JSON/text replies (TASK: <name> dispatch).
-│   └── tests/                    pytest suite (132 tests total)
+│   │       └── visuals.py        Validation/normalisation of illustration specs the model returns. 6 templates:
+│   │                             thales, function_plot, process_flow, timeline, comparison, concept_map (last resort).
+│   │                             No mock_api.py/mock_llm.py anymore -- deleted 9-10 Nov: the app has no built-in
+│   │                             fake service and no fallback (see claude/herwiego-app-status.md).
+│   ├── scripts/test_db.py        Test database: fake users (unique pseudos, generated passwords → test-users.csv), activity + scores
+│   └── tests/                    pytest suite (187 tests total)
+│       ├── _fake_service.py      TEST-ONLY fake httpx transport (quota/saturation/ceiling contract + synthetic
+│       │                         task replies). Not imported by backend/app; create_app(ai_transport=...) is the
+│       │                         injection point. Replaces the old mock_api.py/mock_llm.py for test purposes.
 │       ├── test_app.py           Auth + core HTTP/WS happy paths
 │       ├── test_orchestration.py Model routing (mid=figures, compact=text), fallback
 │       ├── test_gateway.py       Gateway: retries, quota, concurrency, cache, metrics
 │       ├── test_ai_optim.py      Semantic cache, in-flight merge, schema repair
+│       ├── test_visuals.py       sanitize_visual/describe_figure for the timeline + comparison templates
 │       ├── test_materials.py     RAG upload/index/search, images, PDFs, personal-data guard
 │       ├── test_features.py      Live rooms: camera relay, chat, DM, games (trivia/mime/pictionary), resume
 │       ├── test_forest.py        Study forest: tree growth/wilt/plant rules (fake clocks) + WebSocket flow
+│       ├── test_phonetree.py     Pocket tree: link token, grow/wither state machine, WS flow, forest log/alert
 │       ├── test_draw.py          Pictionary drawing relay (performer-only, late-watcher sync, clamping) + game opt-out
 │       ├── test_review.py        SM-2 scheduling + endpoints
-│       ├── test_hardening.py     Rate limits, auth edge cases, production refusals
+│       ├── test_scoring.py       Score caps, visits + streaks, levels/ranks, /api/score, the test-DB script
+│       ├── test_hardening.py     Rate limits, auth edge cases, startup refusals (missing key, weak prod secret)
 │       └── test_i18n.py          Every server string translated FR/AR/Darija
 │
 ├── frontend/                     React + Vite single-page app (JavaScript/JSX)
@@ -67,7 +85,7 @@ ednova/
 │   ├── public/models/            Self-hosted face models (BlazeFace + FaceMesh, ~2 MB, MIT) for the opt-in attention check
 │   └── src/
 │       ├── main.jsx              React root
-│       ├── App.jsx               Routes: / /study /rooms /rooms/:code /live /live/:code /forest /forest/:code /review + navbar
+│       ├── App.jsx               Routes: / /study /rooms /rooms/:code /live /live/:code /review /tree/:token (/forest/* → /live) + navbar
 │       ├── styles.css            All styling (design tokens, components, RTL, reduced-motion)
 │       ├── lib/
 │       │   ├── api.js            fetch wrapper (bearer token), WS URL builder, raw-material URL, lang header
@@ -77,9 +95,10 @@ ednova/
 │       │   ├── attention.js      Camera attention: pure tracker (createTracker/classify) + lazy on-device face-model loader
 │       │   └── i18n.jsx          t()/tx()/tr() + language context; loads locale dicts
 │       ├── locales/              fr.js, ar.js, darija.js (English-key → translation dictionaries)
-│       ├── components/           AIStatus.jsx, Common.jsx (TimerRing, Dots…), Materials.jsx, QrCode.jsx (inline-SVG QR), Tree.jsx (SVG tree), DrawBoard.jsx (pictionary canvas), Study.jsx (Explanation, HintLadder, SoloQuiz, ProgressPanel…)
-│       ├── pages/                Home, Study (solo tutor), Rooms (lobby), Room (study room), Live (lobby), Live→LiveRoom, Forest (study forest + QR invite), Review
-│       └── visuals/              Illustration renderers: Thales, FunctionPlot, ProcessFlow, ConceptMap + VisualSheet (dispatcher) + util.js
+│       ├── components/           AIStatus.jsx, Logo.jsx (HerwieGO mark: H + rising arrow + graduation cap; also public/favicon.svg), Backdrop.jsx (interactive canvas background), RoomForest.jsx (room forest: pocket trees + one QR + copy invite), Notepad.jsx (live-room study notepad), Common.jsx (TimerRing, Dots…), Materials.jsx, QrCode.jsx (inline-SVG QR), Tree.jsx (SVG tree), DrawBoard.jsx (pictionary canvas), Study.jsx (Explanation, HintLadder, SoloQuiz, ProgressPanel…)
+│       ├── pages/                Home, Study (solo tutor), Rooms (lobby), Room (study room), Live (lobby), Live→LiveRoom (camera wall + forest + notepad), Review, PhoneTree (standalone /tree/:token page)
+│       └── visuals/              Illustration renderers: Thales, FunctionPlot, ProcessFlow, Timeline, Comparison,
+│                                  ConceptMap + VisualSheet (dispatcher) + util.js
 │
 ├── e2e/                          Playwright/Chromium browser tests (run against a live server on :8000)
 │   ├── run.py                    Main suite (home, solo study, illustrations, rooms, live)
@@ -90,7 +109,6 @@ ednova/
 │   ├── lang.py                   Language switch + RTL
 │   ├── review.py                 Spaced-repetition flashcards
 │   ├── resume.py                 Revision-sheet button
-│   ├── forest.py                 Study forest + QR end-to-end: QR decode, two users, grow/wilt/plant, replant (~3–4 min)
 │   ├── draw.py                   Pictionary drawing board: performer draws, watcher sees it live, Clear empties both (~2 min)
 │   ├── attention.py              Opt-in camera attention check (fake camera + synthetic face); _synth_face.py builds the clip
 │   ├── _shot.py                  Screenshot helper

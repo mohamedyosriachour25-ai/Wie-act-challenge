@@ -6,11 +6,13 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from app.ai import mock_llm
 from app.config import load_settings
 from app.i18n import CATALOG, LANGS, norm, tr
 from app.main import create_app
 from app.routes_study import DIAGNOSTIC
+
+from . import _fake_service as mock_llm
+from ._fake_service import build_fake, fake_ai_settings
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 INTERNAL = ("bad ", "too few", "empty selection")
@@ -20,7 +22,7 @@ def literals() -> set[str]:
     """Every English sentence the code can show a person: tr("..."), AIError("kind", "..."), user-facing ValueError("...")."""
     found: set[str] = set()
     for path in APP.rglob("*.py"):
-        if path.name in ("i18n.py",) or "mock" in path.name:
+        if path.name == "i18n.py":
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
@@ -61,7 +63,8 @@ def test_translations_keep_their_placeholders_and_use_the_right_script():
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))) as c:
+    transport, _ = build_fake()
+    with TestClient(create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=transport)) as c:
         yield c
 
 

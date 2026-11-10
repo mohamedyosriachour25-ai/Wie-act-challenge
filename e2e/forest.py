@@ -1,13 +1,13 @@
 """Study forest: QR join link, a tree that grows while the tab is focused, wilts when its owner is away, is
 planted at the end of the focus phase, and starts again next session. Uses LIVE-DEMO (1 min focus, 1 min break),
-so the whole run takes about 3 to 4 minutes. Set EDNOVA_QUICK=1 to skip the final 'next session' part."""
+so the whole run takes about 3 to 4 minutes. Set HERWIEGO_QUICK=1 to skip the final 'next session' part."""
 import json, os, random, re, tempfile, time
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
-BASE = os.environ.get("EDNOVA_BASE", "http://127.0.0.1:8000")
-SHOTS = os.environ.get("EDNOVA_SHOTS", "shots")
-QUICK = bool(os.environ.get("EDNOVA_QUICK"))
+BASE = os.environ.get("HERWIEGO_BASE", "http://127.0.0.1:8000")
+SHOTS = os.environ.get("HERWIEGO_SHOTS", "shots")
+QUICK = bool(os.environ.get("HERWIEGO_QUICK"))
 ROOM = "LIVE-DEMO"
 ARGS = ["--no-sandbox"]
 problems = []
@@ -53,7 +53,7 @@ AWAY = "Object.defineProperty(document, 'visibilityState', {configurable: true, 
 BACK = "delete document.visibilityState; document.dispatchEvent(new Event('visibilitychange')); true"
 
 with sync_playwright() as p:
-    br = p.chromium.launch(executable_path=os.environ.get("EDNOVA_CHROME") or None, args=ARGS)
+    br = p.chromium.launch(executable_path=os.environ.get("HERWIEGO_CHROME") or None, args=ARGS)
     ca = br.new_context(viewport={"width": 1100, "height": 1100}); cb = br.new_context(viewport={"width": 1100, "height": 1100})
     a, b = ca.new_page(), cb.new_page()
     reqs, errors = [], []

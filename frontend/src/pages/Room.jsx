@@ -150,7 +150,7 @@ function RoomView({ code }) {
           <form className="ask" onSubmit={(e) => { e.preventDefault(); send({ type: "topic", topic: topicDraft }); }}>
             <label className="grow">
               {t("Topic for the room")}
-              <input value={topicDraft} onChange={(e) => setTopicDraft(e.target.value)} maxLength={160} placeholder={t("e.g. Thales theorem")} />
+              <input value={topicDraft} onChange={(e) => setTopicDraft(e.target.value)} maxLength={160} placeholder={t("Type the topic to study")} />
             </label>
             <button className="btn" disabled={topicDraft.trim().length < 2 || topicDraft.trim() === topic}>{t("Set topic")}</button>
           </form>
@@ -173,7 +173,7 @@ function RoomView({ code }) {
             <form className="ask" onSubmit={(e) => { e.preventDefault(); if (question.trim().length >= 3) { send({ type: "ask", question }); setQuestion(""); } }}>
               <label className="grow">
                 {t("Question for everyone")}
-                <input value={question} onChange={(e) => setQuestion(e.target.value)} maxLength={300} placeholder={t("e.g. What do mitochondria do?")} />
+                <input value={question} onChange={(e) => setQuestion(e.target.value)} maxLength={300} placeholder={t("Type a question about the material")} />
               </label>
               <button className="btn" disabled={!!busy || question.trim().length < 3}>{t("Ask")}</button>
             </form>

@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 from app import rooms
 from app.config import load_settings
 from app.main import create_app
+
+from ._fake_service import build_fake, fake_ai_settings
 from app.rooms import Member, Room, live_cycle
 
 from .test_app import recv_until, signup
@@ -204,7 +206,7 @@ def test_group_rooms_have_no_trees():
 # ----------------------------------------------------------------- over the WebSocket
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), mock_latency_scale=0.0))
+    app = create_app(load_settings(db_path=str(tmp_path / "t.db"), **fake_ai_settings()), ai_transport=build_fake()[0])
     with TestClient(app) as c:
         yield c
 
@@ -244,8 +246,10 @@ def test_a_plain_live_room_view_is_unaffected_by_the_forest(client):
         assert all("tree" not in m for m in p["members"])
 
 
-def test_the_forest_room_is_seeded_and_listed(client):
+def test_there_is_no_separate_forest_room_anymore(client):
+    """Every live room carries its own forest (pocket trees); the stand-alone forest room was retired."""
     token = signup(client, "ada_l")
     r = client.get("/api/rooms?kind=live", headers={"Authorization": f"Bearer {token}"}).json()["rooms"]
-    forest = next(x for x in r if x["code"] == "LIVE-FOREST")
-    assert (forest["focus_min"], forest["break_min"]) == (25, 5)
+    codes = {x["code"] for x in r}
+    assert "LIVE-FOREST" not in codes
+    assert {"LIVE-DEEP", "LIVE-DEMO"} <= codes

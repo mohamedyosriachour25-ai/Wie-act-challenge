@@ -201,7 +201,7 @@ export function AskMaterial({ scope = "me" }) {
       <form className="ask" onSubmit={submit}>
         <label className="grow">
           {t("Question")}
-          <input value={q} onChange={(e) => setQ(e.target.value)} maxLength={300} placeholder={t("e.g. What do mitochondria do?")} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} maxLength={300} placeholder={t("Type a question about the material")} />
         </label>
         <button className="btn" disabled={busy || q.trim().length < 3}>{busy ? t("Searching") : t("Ask")}</button>
       </form>

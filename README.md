@@ -1,8 +1,8 @@
-# EdNova
+# HerwieGO
 
-A learning companion for IEEE WIE ACT 5.0 (EdNova GenAI Peer Learning Companion challenge). Every explanation comes with an interactive illustration beside the text. Learners can study alone, in a study room of 2 to 10 people, or in a public Live focus room.
+A learning companion for IEEE WIE ACT 5.0 (GenAI Peer Learning Companion challenge). Every explanation comes with an interactive illustration beside the text. Learners can study alone, in a study room of 2 to 10 people, or in a public Live focus room.
 
-**Status:** working prototype. It runs end to end against a built-in fake inference service that follows the challenge's API contract. Switching to the real service is a configuration change (see below). The mock returns canned lessons, so lesson quality can only be judged with the real models.
+**Status:** working prototype. Every lesson, quiz and illustration comes from the real OpenAI-compatible inference service, configured via `HERWIEGO_BASE_URL`/`HERWIEGO_API_KEY` (see below) -- there is no built-in fake service and no fallback; the app refuses to start without real credentials.
 
 ## Run it
 
@@ -12,7 +12,7 @@ Backend (Python 3.11+):
 cd backend
 python -m venv venv && source venv/bin/activate      # Windows PowerShell: .\venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-cp .env.example .env          # optional: without it the built-in fake service is used
+cp .env.example .env          # required: fill in HERWIEGO_BASE_URL and HERWIEGO_API_KEY, there is no fallback
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
@@ -25,20 +25,34 @@ npm run dev                   # http://localhost:5173, proxies /api and /ws to :
 npm run build                 # then the backend serves frontend/dist on :8000 by itself
 ```
 
-Tests: `cd backend && python -m pytest -q` (100 backend tests, including orchestration and translation coverage) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija).
+Tests: `cd backend && python -m pytest -q` (151 backend tests, including orchestration and translation coverage, run against a test-only fake HTTP transport -- see "Testing without a live key" below) and `cd frontend && npm run i18n:check` (every interface sentence must exist in French, Arabic and Darija).
+
+### Testing without a live key
+
+The app itself has no fallback: it refuses to start without a real `HERWIEGO_BASE_URL`/`HERWIEGO_API_KEY`. The test suite still runs without one -- `backend/tests/_fake_service.py` is a test-only `httpx` transport that speaks the same contract (quota/saturation/ceiling errors, usage headers) so the gateway's resilience logic and the app's end-to-end flows can be verified without spending the real, billed key on every run. Nothing under `backend/app` imports it.
+
+### Test database (fake users, tracking, scores)
+
+```bash
+cd backend
+python scripts/test_db.py create        # herwiego-test.db + test-users.csv (30 users, 3 weeks of activity)
+python scripts/test_db.py report        # who is tracked: last seen, logins, actions, score, level
+HERWIEGO_DB=herwiego-test.db uvicorn app.main:app --reload   # then sign in with any pseudo/password from the CSV
+```
+`add --pseudo name` adds one more user (password generated, appended to the CSV); `report --user name` shows one user's points and activity. Every action in the app is tracked (`activity`) and scored (`points`, rules in `app/scoring.py`); the score, level, rank and leaderboard show on the Home page.
 
 ## Connect the real service
 
 Edit `backend/.env` (never commit it):
 
 ```
-EDNOVA_BASE_URL=<base url from the organisers>
-EDNOVA_API_KEY=<your team key>
-EDNOVA_COMPACT_MODEL=<compact model id from GET /v1/models>
-EDNOVA_MID_MODEL=<mid-size model id from GET /v1/models>
-EDNOVA_EMBED_MODEL=<embeddings model id>
-EDNOVA_MIN_SIMILARITY=<0.1 for the fake service; tune on the real embeddings>
-EDNOVA_MAX_CONCURRENT=<per-key concurrency ceiling>
+HERWIEGO_BASE_URL=<base url from the organisers>
+HERWIEGO_API_KEY=<your team key>
+HERWIEGO_COMPACT_MODEL=<compact model id from GET /v1/models>
+HERWIEGO_MID_MODEL=<mid-size model id from GET /v1/models>
+HERWIEGO_EMBED_MODEL=<embeddings model id>
+HERWIEGO_MIN_SIMILARITY=<0.1 to start; tune on the real embeddings>
+HERWIEGO_MAX_CONCURRENT=<per-key concurrency ceiling>
 ```
 
 Assumptions to confirm with the organisers, because the guide does not specify them: the HTTP status and header names for "team quota exhausted" (the gateway assumes 429 with Retry-After or a `retry_after` field in the body), the names of the quota headers (any header containing "remaining" is read), and how the vector collection is queried.
@@ -46,15 +60,15 @@ Assumptions to confirm with the organisers, because the guide does not specify t
 ## Architecture
 
 ```
-React (Vite)  <--REST + WebSocket-->  FastAPI  -->  AI gateway  -->  inference service
+React (Vite)  <--REST + WebSocket-->  FastAPI  -->  AI gateway  -->  real inference service
  Home, Solo, Study rooms, Live         auth, study,      routing, cache, retries,    compact + mid-size
- illustration renderers                rooms, progress   fallback, metrics           (fake one built in)
+ illustration renderers                rooms, progress   fallback, metrics           (your HERWIEGO_BASE_URL)
 ```
 
 - `backend/app/ai/gateway.py`: the only code that talks to the inference service.
 - `backend/app/ai/pipeline.py`: the study steps and which model class handles each.
 - `backend/app/ai/visuals.py`: validation of the illustration specs the model produces.
-- `backend/app/ai/mock_api.py`, `mock_llm.py`: the fake service used for development and demos.
+- `backend/tests/_fake_service.py`: test-only fake HTTP transport (not used by the running app).
 - `backend/app/rooms.py`: group rooms and Live rooms over WebSocket.
 - `backend/app/materials.py`: course material upload, chunking, background indexing and similarity search.
 - `frontend/src/visuals/`: one renderer per illustration template.
@@ -79,8 +93,8 @@ An explanation costs three calls: `route` (compact) and `illustrate` (mid-size) 
 
 Two optimisations beyond the base orchestration:
 
-- **Semantic cache.** The gateway already serves byte-identical calls from its cache. On top of that, an explanation or a material answer is reused when a *new request means the same thing* as a recent one — "explain Thales" vs "Thales theorem" — matched with the embeddings endpoint (its own, cheaper quota). A hit skips every generation call; a miss costs one embedding and is remembered. Reuse is scoped by task, language and (for explanations) learning style; grounded material answers are scoped by collection **and a version token**, so adding or removing a document invalidates reuse. Grounded explanations are never reused. Counted in metrics as `semantic_hits`. Tune `EDNOVA_SEM_THRESHOLD` (0.86) and `EDNOVA_SEM_THRESHOLD_ASK` (0.93); turn it off with `EDNOVA_SEMANTIC_CACHE=0`.
-- **Quiz draft-then-revise.** The quiz is drafted by the mid-size model (synthesis) and then reviewed by the compact model (checking): the reviewer corrects a wrong answer key, weak or duplicate distractors, and drops any question without a single defensible answer. It can only keep or improve the draft — if the review fails or is empty, the draft is used unchanged. Costs one extra compact call per quiz; turn it off with `EDNOVA_QUIZ_VERIFY=0`.
+- **Semantic cache.** The gateway already serves byte-identical calls from its cache. On top of that, an explanation or a material answer is reused when a *new request means the same thing* as a recent one — "explain Thales" vs "Thales theorem" — matched with the embeddings endpoint (its own, cheaper quota). A hit skips every generation call; a miss costs one embedding and is remembered. Reuse is scoped by task, language and (for explanations) learning style; grounded material answers are scoped by collection **and a version token**, so adding or removing a document invalidates reuse. Grounded explanations are never reused. Counted in metrics as `semantic_hits`. Tune `HERWIEGO_SEM_THRESHOLD` (0.86) and `HERWIEGO_SEM_THRESHOLD_ASK` (0.93); turn it off with `HERWIEGO_SEMANTIC_CACHE=0`.
+- **Quiz draft-then-revise.** The quiz is drafted by the mid-size model (synthesis) and then reviewed by the compact model (checking): the reviewer corrects a wrong answer key, weak or duplicate distractors, and drops any question without a single defensible answer. It can only keep or improve the draft — if the review fails or is empty, the draft is used unchanged. Costs one extra compact call per quiz; turn it off with `HERWIEGO_QUIZ_VERIFY=0`.
 - **Output reliability.** Route, illustrate and quiz prompts carry a worked example (few-shot) and an explicit JSON schema, and when a model's JSON still fails to parse or validate, the repair pass is **schema-aware** (it is told the exact shape to produce), which recovers far more answers than a generic "fix this JSON" and keeps malformed-output failures and fallbacks down.
 
 ### Languages
@@ -105,7 +119,7 @@ The interface and the prompts work in English, French, Arabic (Modern Standard) 
 
 Learners add a PDF, `.txt`/`.md` file or pasted notes to their own library, and a group room has a shared library. Text is split into passages of about 800 characters and embedded in the background (batches under the endpoint's ceiling, progress shown, waits for the separate embeddings quota instead of failing). Search is cosine similarity over a local SQLite store.
 
-"Narrow before generating": passages below `EDNOVA_MIN_SIMILARITY` are dropped. If none remain there is **no model call** and the user is told the material does not cover the question. If more than 3 remain, a compact call keeps the best ones. One compact call then writes the answer with `[n]` citations that open the source passage. Explanations use the same passages and say which documents they were built from. In a room one question produces one answer shown to everyone.
+"Narrow before generating": passages below `HERWIEGO_MIN_SIMILARITY` are dropped. If none remain there is **no model call** and the user is told the material does not cover the question. If more than 3 remain, a compact call keeps the best ones. One compact call then writes the answer with `[n]` citations that open the source passage. Explanations use the same passages and say which documents they were built from. In a room one question produces one answer shown to everyone.
 
 You can also add **images** (PNG, JPG, WebP, GIF) as visual resources — a photo of the board, a scanned page, a diagram. They are shown in a gallery and opened full size, but they are kept out of retrieval: not indexed, not sent to the AI (no OCR), so they never spend quota. Up to 12 per library.
 
@@ -113,7 +127,7 @@ Safeguards: uploads that look like they contain e-mail addresses or phone number
 
 ### Illustrations
 
-The model never draws. It picks a template (`thales`, `function_plot`, `process_flow`, `concept_map`) and fills in parameters. The backend validates and clamps them, and React draws the figure. If the spec is unusable, a concept map is built from the explanation's own steps, so every explanation has an illustration. To add a template: a validator in `visuals.py`, a renderer in `frontend/src/visuals/`, a line in the catalogue and in `VisualSheet.jsx`.
+The model never draws. It picks whichever template actually fits the topic (`thales`, `function_plot`, `process_flow`, `timeline`, `comparison`, or `concept_map` as a last resort) and fills in parameters -- fresh, topic-specific content every time, never a reused figure. The backend validates and clamps them, and React draws the figure. If the spec is unusable, a concept map is built from the explanation's own steps, so every explanation has an illustration. To add a template: a validator in `visuals.py`, a renderer in `frontend/src/visuals/`, a line in the catalogue and in `VisualSheet.jsx`.
 
 ### Revision (spaced repetition)
 
@@ -125,44 +139,44 @@ A study room is saved as a conversation. Chat, topic changes, AI explanations an
 
 ### Group games on the break
 
-A public Live room runs an opt-in group game at each break. Because the Pomodoro timer is deterministic (epoch-aligned), every client derives the same schedule, so no server loop is needed: near the end of a focus block (the last `EDNOVA_EVENT_LEAD_S` seconds, default 300, clamped to fit the focus length) an invite appears; whoever opts in plays a shared trivia race on the break. The server owns the opt-in list and the live leaderboard (points for a correct answer plus a speed bonus); only people who opted in for that cycle score. Three games ship: a **quiz** (trivia race, simultaneous, scored) and two **turn-based** games, **karaoke** and **mime**. In a turn game each player gets 30 s in a fixed, hidden order — only the *next* player's name is ever announced (the mime word is sent privately to the performer) — and the active player can go on stage with camera and microphone through the same WebRTC mesh. The first person to opt in picks the game for that break. Turn games are driven by a short server task (started when a client reports the break began); the quiz stays clock-driven. A seeded fast-cycle room `LIVE-DEMO` (1-minute focus/break) lets you see focus → break → game in under two minutes — handy for the demo.
+A public Live room runs an opt-in group game at each break. Because the Pomodoro timer is deterministic (epoch-aligned), every client derives the same schedule, so no server loop is needed: near the end of a focus block (the last `HERWIEGO_EVENT_LEAD_S` seconds, default 300, clamped to fit the focus length) an invite appears; whoever opts in plays a shared trivia race on the break. The server owns the opt-in list and the live leaderboard (points for a correct answer plus a speed bonus); only people who opted in for that cycle score. Three games ship, and each player picks one (same-game players play together, in parallel): a **quiz** (AI-generated trivia race, scored on the server) and two **turn games**, **mime** and **pictionary**. Turn games loop in rounds until the break ends — a new random order and new words each round — and every player holds a private word no one else has (swappable up to 3 times a round if it is too hard). A turn ends on time (30 s, or 60 s in rooms with a break of 10 min or more), when the player passes, or when everyone else has guessed in the chat. While a turn game runs it takes the middle of the room: the performer's camera (mime) or the live board (pictionary) beside the chat. Turn games are driven by a short server task (started when a client reports the break began); the quiz stays clock-driven. A seeded fast-cycle room `LIVE-DEMO` (1-minute focus/break) lets you see focus → break → game in under two minutes — handy for the demo.
 
 ### Camera in Live rooms
 
-A Live room can turn into a shared camera wall. Turning your camera on is opt-in and off by default; you then see everyone else who is also sharing (it is reciprocal). The video is **peer to peer** over WebRTC: it never passes through the server, which only relays the small SDP/ICE signalling messages over the room's existing WebSocket, using the "perfect negotiation" pattern so two browsers can connect without clashing. The public space (presence + chat) holds up to `EDNOVA_LIVE_CAPACITY` people (default 500), while `EDNOVA_VIDEO_CAPACITY` (default 9) caps how many cameras share the mesh at once. This is a mesh, so it is meant for a handful of people; many publishers, or peers on different networks behind strict NATs, would need an SFU and a TURN server. The on-device focus signal is unchanged and still uses no camera.
+A Live room can turn into a shared camera wall. Turning your camera on is opt-in and off by default; you then see everyone else who is also sharing (it is reciprocal). The video is **peer to peer** over WebRTC: it never passes through the server, which only relays the small SDP/ICE signalling messages over the room's existing WebSocket, using the "perfect negotiation" pattern so two browsers can connect without clashing. The public space (presence + chat) holds up to `HERWIEGO_LIVE_CAPACITY` people (default 500), while `HERWIEGO_VIDEO_CAPACITY` (default 9) caps how many cameras share the mesh at once. This is a mesh, so it is meant for a handful of people; many publishers, or peers on different networks behind strict NATs, would need an SFU and a TURN server. The on-device focus signal is unchanged and still uses no camera.
 
 ## Deploy
 
 ```bash
-cp .env.example .env     # set EDNOVA_SECRET (openssl rand -hex 32), and for the real service the URL, key and model ids
+cp .env.example .env     # set HERWIEGO_SECRET (openssl rand -hex 32), and for the real service the URL, key and model ids
 docker compose up --build
 ```
 
-One image holds the built React app and the API on port 8000; the database lives in the `ednova-data` volume. The container runs as a non-root user, has a health check on `/api/health`, and starts only when `EDNOVA_SECRET` is set. Put it behind HTTPS (any reverse proxy) for a public deployment and set `EDNOVA_TRUST_PROXY=1` there so per-connection limits see the real client address. CI (`.github/workflows/ci.yml`) runs the backend tests on Python 3.12 and 3.13, the translation check, the frontend build and a container start-up check.
+One image holds the built React app and the API on port 8000; the database lives in the `herwiego-data` volume. The container runs as a non-root user, has a health check on `/api/health`, and starts only when `HERWIEGO_SECRET` is set. Put it behind HTTPS (any reverse proxy) for a public deployment and set `HERWIEGO_TRUST_PROXY=1` there so per-connection limits see the real client address. CI (`.github/workflows/ci.yml`) runs the backend tests on Python 3.12 and 3.13, the translation check, the frontend build and a container start-up check.
 
-Without Docker: `npm run build` in `frontend`, then `EDNOVA_ENV=production EDNOVA_SECRET=... python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log` in `backend`.
+Without Docker: `npm run build` in `frontend`, then `HERWIEGO_ENV=production HERWIEGO_SECRET=... python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log` in `backend`.
 
 ### Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EDNOVA_BASE_URL` / `EDNOVA_API_KEY` | `mock` / dev key | AI service. `mock` = built-in fake service |
-| `EDNOVA_COMPACT_MODEL`, `EDNOVA_MID_MODEL`, `EDNOVA_EMBED_MODEL` | | model ids from `GET /v1/models` |
-| `EDNOVA_ENV` | `development` | `production` refuses a weak secret or missing key and hides `/docs` |
-| `EDNOVA_SECRET` | dev value | signs session tokens; at least 24 random characters in production |
-| `EDNOVA_USER_AI_PER_MIN` | 20 | AI actions one learner may start per minute |
-| `EDNOVA_LOGIN_ATTEMPTS` | 8 | failed sign-ins per 5 min per pseudo (5x per connection) |
-| `EDNOVA_REGISTER_PER_HOUR` | 15 | accounts created per connection per hour |
-| `EDNOVA_TRUST_PROXY` | 0 | read the client address from `X-Forwarded-For` |
-| `EDNOVA_LIVE_CAPACITY` | 500 | people allowed in one public Live room (presence + chat) |
-| `EDNOVA_VIDEO_CAPACITY` | 9 | cameras sharing one Live-room mesh at once |
-| `EDNOVA_EVENT_LEAD_S` | 300 | how long before a break the group-game invite opens |
-| `EDNOVA_EVENT_MIN_PLAYERS` | 2 | players needed for a group game |
-| `EDNOVA_SEMANTIC_CACHE` | 1 | reuse near-duplicate requests via embeddings (0 to disable) |
-| `EDNOVA_SEM_THRESHOLD` / `_ASK` | 0.86 / 0.93 | cosine thresholds for explanation / material-answer reuse |
-| `EDNOVA_QUIZ_VERIFY` | 1 | compact reviewer checks the quiz draft (0 to disable) |
-| `EDNOVA_MAX_CONCURRENT`, `EDNOVA_MIN_SIMILARITY`, `EDNOVA_MAX_QUOTA_WAIT_S`, `EDNOVA_CACHE_TTL_S` | 2, 0.1, 45, 6 h | gateway tuning |
-| `EDNOVA_DB`, `EDNOVA_LOG_LEVEL` | `ednova.db`, `INFO` | |
+| `HERWIEGO_BASE_URL` / `HERWIEGO_API_KEY` | none -- required | your real AI service; the app refuses to start without both |
+| `HERWIEGO_COMPACT_MODEL`, `HERWIEGO_MID_MODEL`, `HERWIEGO_EMBED_MODEL` | | model ids from `GET /v1/models` |
+| `HERWIEGO_ENV` | `development` | `production` refuses a weak secret or missing key and hides `/docs` |
+| `HERWIEGO_SECRET` | dev value | signs session tokens; at least 24 random characters in production |
+| `HERWIEGO_USER_AI_PER_MIN` | 20 | AI actions one learner may start per minute |
+| `HERWIEGO_LOGIN_ATTEMPTS` | 8 | failed sign-ins per 5 min per pseudo (5x per connection) |
+| `HERWIEGO_REGISTER_PER_HOUR` | 15 | accounts created per connection per hour |
+| `HERWIEGO_TRUST_PROXY` | 0 | read the client address from `X-Forwarded-For` |
+| `HERWIEGO_LIVE_CAPACITY` | 500 | people allowed in one public Live room (presence + chat) |
+| `HERWIEGO_VIDEO_CAPACITY` | 9 | cameras sharing one Live-room mesh at once |
+| `HERWIEGO_EVENT_LEAD_S` | 300 | how long before a break the group-game invite opens |
+| `HERWIEGO_EVENT_MIN_PLAYERS` | 2 | players needed for a group game |
+| `HERWIEGO_SEMANTIC_CACHE` | 1 | reuse near-duplicate requests via embeddings (0 to disable) |
+| `HERWIEGO_SEM_THRESHOLD` / `_ASK` | 0.86 / 0.93 | cosine thresholds for explanation / material-answer reuse |
+| `HERWIEGO_QUIZ_VERIFY` | 1 | compact reviewer checks the quiz draft (0 to disable) |
+| `HERWIEGO_MAX_CONCURRENT`, `HERWIEGO_MIN_SIMILARITY`, `HERWIEGO_MAX_QUOTA_WAIT_S`, `HERWIEGO_CACHE_TTL_S` | 2, 0.1, 45, 6 h | gateway tuning |
+| `HERWIEGO_DB`, `HERWIEGO_LOG_LEVEL` | `herwiego.db`, `INFO` | |
 
 ### Security and operations
 
@@ -183,4 +197,4 @@ Without Docker: `npm run build` in `frontend`, then `EDNOVA_ENV=production EDNOV
 
 ## Not built yet
 
-Camera-based attention detection (planned fully on-device), internet retrieval from public sources, Forest or QR phone pairing, shared study stream, karaoke games, resume generator, voice read-aloud, teacher dashboard.
+Camera-based attention detection (planned fully on-device), internet retrieval from public sources, shared study stream, karaoke games, resume generator, voice read-aloud, teacher dashboard.

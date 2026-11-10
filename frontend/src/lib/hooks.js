@@ -239,7 +239,9 @@ export function useVideoMesh(send, myId) {
   const [error, setError] = useState(null);
   const [tiles, setTiles] = useState([]); // remote tiles: { id, pseudo, stream }
   const [localStream, setLocalStream] = useState(null);
+  const [watching, setWatching] = useState(false); // in the mesh to receive video, without sharing a camera
 
+  const joined = useRef(false);
   const peers = useRef(new Map()); // id -> { pc, pseudo, polite, makingOffer, ignoreOffer }
   const local = useRef(null);
   const sendRef = useRef(send); sendRef.current = send;
@@ -306,9 +308,11 @@ export function useVideoMesh(send, myId) {
     peers.current.clear();
     local.current?.getTracks().forEach((t) => t.stop());
     local.current = null;
+    joined.current = false;
     setLocalStream(null);
     setTiles([]);
     setCameraOn(false);
+    setWatching(false);
   }
 
   const start = useCallback(async (audio = false) => {
@@ -319,6 +323,10 @@ export function useVideoMesh(send, myId) {
       local.current = stream;
       setLocalStream(stream);
       setCameraOn(true);
+      setWatching(false);
+      // Already watching: hand the new tracks to the open connections (they renegotiate on their own).
+      peers.current.forEach(({ pc }) => stream.getTracks().forEach((track) => pc.addTrack(track, stream)));
+      joined.current = true;
       sendRef.current({ type: "rtc_join" });
     } catch {
       setError({ message: "denied" });
@@ -334,6 +342,19 @@ export function useVideoMesh(send, myId) {
   const perform = useCallback(() => { if (!cameraOn) start(true); }, [cameraOn, start]);       // go on stage: camera + mic
   const leaveStage = useCallback(() => { if (cameraOn) { sendRef.current({ type: "rtc_leave" }); stop(); } }, [cameraOn]);
 
+  // Watch only: see the others' cameras (a mime performer) without turning yours on.
+  const watch = useCallback(() => {
+    if (joined.current) return;
+    joined.current = true;
+    setWatching(true);
+    sendRef.current({ type: "rtc_join", watch: true });
+  }, []);
+  const unwatch = useCallback(() => {
+    if (!joined.current || local.current) return;   // sharing a camera: leave that to toggle / leaveStage
+    sendRef.current({ type: "rtc_leave" });
+    stop();
+  }, []);
+
   useEffect(() => () => { sendRef.current?.({ type: "rtc_leave" }); stop(); }, []); // leave on unmount
-  return { cameraOn, starting, error, tiles, localStream, toggle, perform, leaveStage, signal };
+  return { cameraOn, starting, error, tiles, localStream, watching, toggle, perform, leaveStage, watch, unwatch, signal };
 }
